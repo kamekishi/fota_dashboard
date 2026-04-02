@@ -1,0 +1,304 @@
+{
+    "S25 Series": [
+        {
+            "name": "S25",
+            "model": "SM-S931B",
+            "csc": "EUX",
+            "imei": "352688830088320",
+            "category": "S25 Series",
+            "base": "S931BXXU8ZZCB/S931BOXM8ZZCB/S931BXXU8CZCB"
+        },
+        {
+            "name": "S25",
+            "model": "SM-S931B",
+            "csc": "INS",
+            "imei": "350505560002747",
+            "category": "S25 Series",
+            "base": "S931BXXU8ZZCB/S931BOXM8ZZCB/S931BXXU8CZCB"
+        },
+        {
+            "name": "S25+",
+            "model": "SM-S936B",
+            "csc": "EUX",
+            "imei": "351232090011358",
+            "category": "S25 Series",
+            "base": "S936BXXS8BZB5/S936BOXM8BZB5/S936BXXS8BZB5"
+        },
+        {
+            "name": "S25+",
+            "model": "SM-S936B",
+            "csc": "INS",
+            "imei": "351232090006994",
+            "category": "S25 Series",
+            "base": "S936BXXU8ZZCB/S936BOXM8ZZCB/S936BXXU8CZCB"
+        },
+        {
+            "name": "S25 Edge",
+            "model": "SM-S937B",
+            "csc": "EUX",
+            "imei": "351478610252598",
+            "category": "S25 Series",
+            "base": "S937BXXU6CZC3/S937BOXM6CZC3/S937BXXU6CZC3"
+        },
+        {
+            "name": "S25 Ultra",
+            "model": "SM-S938B",
+            "csc": "EUX",
+            "imei": "354222650031778",
+            "category": "S25 Series",
+            "base": "S938BXXU8ZZCF/S938BOXM8ZZCF/S938BXXU8CZCF"
+        },
+        {
+            "name": "S25 Ultra",
+            "model": "SM-S938B",
+            "csc": "INS",
+            "imei": "354222650031455",
+            "category": "S25 Series",
+            "base": "S938BXXS8BZB5/S938BOXM8BZB5/S938BXXS8BZB5"
+        },
+        {
+            "name": "S25",
+            "model": "SM-S931U1",
+            "csc": "XAA",
+            "imei": "350135000015164",
+            "category": "S25 Series",
+            "base": "S931U1UEU8ZZAO.DM/S931U1OYM8ZZAO/S931U1UEU8CZAO"
+        },
+        {
+            "name": "S25 Ultra",
+            "model": "SM-S938U",
+            "csc": "ATT",
+            "imei": "352512140059591",
+            "category": "S25 Series",
+            "base": "S938USQU8ZZCB/S938UOYN8ZZCB/S938USQU8CZCB"
+        },
+        {
+            "name": "S25 Ultra",
+            "model": "SM-S938U1",
+            "csc": "VZW",
+            "imei": "350730230009670",
+            "category": "S25 Series",
+            "base": "S938U1UES8BYLX/S938U1OYM8BYLX/S938U1UES8BYLX"
+        }
+    ],
+    "S26 Series": [
+        {
+            "name": "S26",
+            "model": "SM-S942B",
+            "csc": "EUX",
+            "imei": "350885180000622",
+            "category": "S26 Series",
+            "base": "S942BXXU1AZC9/S942BOXM1AZC9/S942BXXU1AZC9"
+        },
+        {
+            "name": "S26+",
+            "model": "SM-S947B",
+            "csc": "EUX",
+            "imei": "350032510000036",
+            "category": "S26 Series",
+            "base": "S947BXXU1AZCF/S947BOXM1AZCF/S947BXXU1AZCF"
+        },
+        {
+            "name": "S26 Ultra",
+            "model": "SM-S948B",
+            "csc": "XSA",
+            "imei": "350933070001084",
+            "category": "S26 Series",
+            "base": "S948BXXU2AZCN/S948BOXM2AZCN/S948BXXU2AZCN"
+        }
+    ],
+    "S24 Series": [
+        {
+            "name": "S24 Ultra",
+            "model": "SM-S928B",
+            "csc": "INS",
+            "imei": "358366880006203",
+            "category": "S24 Series",
+            "base": "S928BXXU5DZC3/S928BOXM5DZC3/S928BXXU5DZC3"
+        },
+        {
+            "name": "S24 Ultra",
+            "model": "SM-S928B",
+            "csc": "EUX",
+            "imei": "351478690016939",
+            "category": "S24 Series",
+            "base": "S928BXXU5DZC9/S928BOXM5DZC9/S928BXXU5DZC9"
+        },
+        {
+            "name": "S24+",
+            "model": "SM-S926B",
+            "csc": "INS",
+            "imei": "350110540004556",
+            "category": "S24 Series",
+            "base": "S926BXXSDCZB2/S926BOXMDCZB2/S926BXXSDCZB2"
+        },
+        {
+            "name": "S24",
+            "model": "SM-S921B",
+            "csc": "INS",
+            "imei": "358080590006813",
+            "category": "S24 Series",
+            "base": "S921BXXUDDZC3/S921BOXMDDZC3/S921BXXUDDZC3"
+        }
+    ],
+    "S23 Series": [
+        {
+            "name": "S23 Ultra",
+            "model": "SM-S918B",
+            "csc": "INS",
+            "imei": "351621670000916",
+            "category": "S23 Series",
+            "base": "S918BXXS9EZB6/S918BOXM9EZB6/S918BXXS9EZB6"
+        },
+        {
+            "name": "S23 Ultra",
+            "model": "SM-S918B",
+            "csc": "EUX",
+            "imei": "351552170000462",
+            "category": "S23 Series",
+            "base": "S918BXXU9FZCB/S918BOXM9FZCB/S918BXXU9FZCB"
+        },
+        {
+            "name": "S23+",
+            "model": "SM-S916B",
+            "csc": "SER",
+            "imei": "354709480028966",
+            "category": "S23 Series",
+            "base": "S916BXXU9FZC9/S916BOXM9FZC9/S916BXXU9FZC9"
+        },
+        {
+            "name": "S23+",
+            "model": "SM-S916B",
+            "csc": "INS",
+            "imei": "352496800009064",
+            "category": "S23 Series",
+            "base": "S916BXXS9EZB6/S916BOXM9EZB6/S916BXXS9EZB6"
+        },
+        {
+            "name": "S23+",
+            "model": "SM-S916B",
+            "csc": "EUX",
+            "imei": "354709480004926",
+            "category": "S23 Series",
+            "base": "S916BXXU9FZC9/S916BOXM9FZC9/S916BXXU9FZC9"
+        },
+        {
+            "name": "S23",
+            "model": "SM-S911B",
+            "csc": "INS",
+            "imei": "355418870000978",
+            "category": "S23 Series",
+            "base": "S911BXXU9FZC9/S911BOXM9FZC9/S911BXXU9FZC9"
+        }
+    ],
+    "S22 Series": [
+        {
+            "name": "S22",
+            "model": "SM-S901B",
+            "csc": "EUX",
+            "imei": "350330050038089",
+            "category": "S22 Series",
+            "base": "S901BXXUMHZC9/S901BOXMMHZC9/S901BXXUMHZC9"
+        },
+        {
+            "name": "S22",
+            "model": "SM-S901E",
+            "csc": "INS",
+            "imei": "355066960054833",
+            "category": "S22 Series",
+            "base": "S901EXXUDHZB9.DM/S901EOXMDHZB9/S901EXXUDHZB9"
+        },
+        {
+            "name": "S22 Plus",
+            "model": "SM-S906E",
+            "csc": "INS",
+            "imei": "355066960010000",
+            "category": "S22 Series",
+            "base": "S906EXXUDHZC9/S906EOXMDHZC9/S906EXXUDHZC9"
+        }
+    ],
+    "Fold and Flip": [
+        {
+            "name": "Fold 7",
+            "model": "SM-F966B",
+            "csc": "EUX",
+            "imei": "350966320052002",
+            "category": "Fold and Flip",
+            "base": "F966BXXU8BZC3/F966BOXM8BZC3/F966BXXU8BZC3"
+        },
+        {
+            "name": "Fold 7",
+            "model": "SM-F966U",
+            "csc": "VZW",
+            "imei": "353758330069366",
+            "category": "Fold and Flip",
+            "base": "F966USQU8BZB5/F966UOYN8BZB5/F966USQU8BZB5"
+        },
+        {
+            "name": "Fold 6",
+            "model": "SM-F956B",
+            "csc": "INS",
+            "imei": "352898270005078",
+            "category": "Fold and Flip",
+            "base": "F956BXXU3DZC3/F956BOXM3DZC3/F956BXXU3DZC3"
+        },
+        {
+            "name": "Fold 5",
+            "model": "SM-F946B",
+            "csc": "INS",
+            "imei": "350022680020773",
+            "category": "Fold and Flip",
+            "base": "F946BXXU6GZC9/F946BOXM6GZC9/F946BXXU6GZC9"
+        },
+        {
+            "name": "Fold 4",
+            "model": "SM-F936B",
+            "csc": "INS",
+            "imei": "350181330000013",
+            "category": "Fold and Flip",
+            "base": "F936BXXUBJZB9.DM/F936BOXMBJZB9/F936BXXUBJZB9"
+        },
+        {
+            "name": "TriFold",
+            "model": "SM-F968B",
+            "csc": "XSG",
+            "imei": "351451950001578",
+            "category": "Fold and Flip",
+            "base": "F968BXXU3BZB9/F968BOXM3BZB9/F968BXXU3BZB9"
+        }
+    ],
+    "Tablets": [
+        {
+            "name": "Tab S8 5G",
+            "model": "SM-X706B",
+            "csc": "EUX",
+            "imei": "352952650015684",
+            "category": "Tablets",
+            "base": "X706BXXUAEZC3/X706BOXMAEZC3/X706BXXUAEZC3"
+        },
+        {
+            "name": "Tab S9 Ultra",
+            "model": "SM-X916B",
+            "csc": "EUX",
+            "imei": "353070870017130",
+            "category": "Tablets",
+            "base": "X916BXXS6DZB6.DM/X916BOXM6DZB6/X916BXXS6DZB6"
+        },
+        {
+            "name": "Tab S10 Ultra",
+            "model": "SM-X926B",
+            "csc": "EUX",
+            "imei": "353192340096625",
+            "category": "Tablets",
+            "base": "X926BXXU7DZB3/X926BOXM7DZB3/X926BXXU7DZB3"
+        },
+        {
+            "name": "Tab S11 Ultra",
+            "model": "SM-X936B",
+            "csc": "EUX",
+            "imei": "353192340096625",
+            "category": "Tablets",
+            "base": "X936BXXU5AZBD/X936BOXM5AZBD/X936BXXU5AZBD"
+        }
+    ]
+}
