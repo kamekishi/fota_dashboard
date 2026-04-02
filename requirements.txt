@@ -1,0 +1,8 @@
+streamlit
+requests
+urllib3
+rich
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
