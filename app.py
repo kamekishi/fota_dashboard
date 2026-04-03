@@ -47,9 +47,19 @@ def init_state() -> None:
         "imei_last_hit": None,
         "fota_task_id": None,
         "imei_task_id": None,
+        "fota_completed_task_id": None,
+        "imei_completed_task_id": None,
+        "fota_live_request": None,
+        "fota_live_result": None,
+        "fota_live_error": None,
+        "imei_live_request": None,
+        "imei_live_result": None,
+        "imei_live_error": None,
+        "imei_live_state": None,
         "active_tab": "Dashboard",
         "activity_feed_visible": True,
         "_selected_device_key": None,
+        "_scan_selected_device_key": None,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -95,6 +105,37 @@ def flatten_devices(catalog: dict[str, list[dict[str, Any]]]) -> list[dict[str, 
             item.setdefault("category", category)
             devices.append(item)
     return devices
+
+
+def update_device_imei(category: str, device_index: int, new_imei: str, source_label: str) -> bool:
+    if not new_imei.isdigit() or len(new_imei) != 15:
+        st.error("IMEI must be exactly 15 digits.")
+        return False
+
+    catalog = load_device_catalog()
+    entries = catalog.get(category, [])
+    if device_index < 0 or device_index >= len(entries):
+        st.error("Selected device could not be updated.")
+        return False
+
+    device = entries[device_index]
+    old_imei = str(device.get("imei", ""))
+    if old_imei == new_imei:
+        push_activity("info", f"{device.get('model', 'Unknown')} already uses IMEI {new_imei}.")
+        return False
+
+    device["imei"] = new_imei
+    save_device_catalog(catalog)
+
+    model = str(device.get("model", "")).upper()
+    csc = str(device.get("csc", "")).upper()
+    if st.session_state.get("scan_model", "").upper() == model and st.session_state.get("scan_csc", "").upper() == csc:
+        st.session_state.scan_imei = new_imei
+    if st.session_state.get("model_input", "").upper() == model and st.session_state.get("csc_input", "").upper() == csc:
+        st.session_state.imei_input = new_imei
+
+    push_activity("info", f"Updated {model} / {csc} to IMEI {new_imei} from {source_label}.")
+    return True
 
 
 def mask_imei(imei: str | None, hidden_digits: int = 7) -> str:
@@ -411,13 +452,23 @@ def perform_remote_lookup(model: str, csc: str, imei: str, base: str | None) -> 
     }
 
 
-def lookup_download_link(model: str, csc: str, imei: str, base: str | None) -> dict[str, Any]:
-    cached = fetch_cached_result(model, csc, imei)
-    if cached:
-        queue_activity("cache", f"Reused cached link for {model} / {csc} / {imei[-4:]}.")
-        return cached
+def lookup_download_link(
+    model: str,
+    csc: str,
+    imei: str,
+    base: str | None,
+    *,
+    use_cache: bool = True,
+) -> dict[str, Any]:
+    if use_cache:
+        cached = fetch_cached_result(model, csc, imei)
+        if cached:
+            queue_activity("cache", f"Reused cached link for {model} / {csc} / {imei[-4:]}.")
+            return cached
+        queue_activity("query", f"Cache miss for {model} / {csc}. Reaching Samsung endpoints.")
+    else:
+        queue_activity("query", f"Running a live Samsung lookup for {model} / {csc} / {imei[-4:]}.")
 
-    queue_activity("query", f"Cache miss for {model} / {csc}. Reaching Samsung endpoints.")
     result = perform_remote_lookup(model, csc, imei, base)
     if result["kind"] in {"update", "dm"}:
         queue_activity("hit", f"Fetched {result['found_pda']} for {model}.")
@@ -514,14 +565,83 @@ def check_endpoint(host: str, port: int = 443, timeout: float = 3.0) -> tuple[bo
         return False, str(exc)
 
 
+def get_probe_device(catalog: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
+    for entries in catalog.values():
+        for entry in entries:
+            if entry.get("model") == "SM-X706B" and entry.get("csc") == "EUX":
+                return entry
+    return None
+
+
+def probe_fota_endpoint(catalog: dict[str, list[dict[str, Any]]]) -> tuple[bool, str]:
+    probe = get_probe_device(catalog)
+    if not probe:
+        return False, "Tab S8 5G probe preset missing"
+
+    model = str(probe.get("model", "")).strip().upper()
+    csc = str(probe.get("csc", "")).strip().upper()
+    imei = str(probe.get("imei", "")).strip()
+    base = str(probe.get("base", "")).strip()
+
+    if not model or not csc or not imei or not base:
+        return False, "Tab S8 5G probe preset incomplete"
+
+    try:
+        mcc, mnc = ("460", "01") if csc in {"CHC", "CHM"} else ("310", "410")
+        client = ota.Client(
+            {
+                "Model": model,
+                "DeviceId": f"IMEI:{imei}",
+                "CustomerCode": csc,
+                "FirmwareVersion": base,
+                "Registered": True,
+                "Mcc": mcc,
+                "Mnc": mnc,
+            }
+        )
+        result = client.check_update(base)
+        result_text = str(result or "").strip()
+        lowered = result_text.lower()
+
+        interrupted_markers = [
+            "403",
+            "auth_failed_banned",
+            "http 403",
+            "forbidden",
+        ]
+        if any(marker in lowered for marker in interrupted_markers):
+            return False, f"Interrupted: {result_text}"
+
+        healthy_markers = [
+            "http://",
+            "https://",
+            "260",
+            "220",
+            "261",
+            "no_pkg_marker",
+            "bad_csc",
+        ]
+        if any(marker in lowered for marker in healthy_markers):
+            return True, f"OTA probe responded: {result_text[:72]}"
+
+        if result_text:
+            return True, f"OTA probe responded: {result_text[:72]}"
+        return False, "OTA probe returned no response"
+    except Exception as exc:
+        message = str(exc)
+        lowered = message.lower()
+        if "403" in lowered or "forbidden" in lowered:
+            return False, f"Interrupted: {message}"
+        return False, message
+
+
 def collect_status_snapshot() -> dict[str, Any]:
     db_ok = DB_PATH.exists()
     devices_ok = DEVICES_PATH.exists()
-    fota_ok, fota_detail = check_endpoint("fota-cloud-dn.ospserver.net")
+    catalog = load_device_catalog() if devices_ok else {}
+    fota_ok, fota_detail = probe_fota_endpoint(catalog) if devices_ok else (False, "devices.json missing")
     fumo_ok, fumo_detail = check_endpoint("fota-secure-dn.ospserver.net")
     dms_ok, dms_detail = check_endpoint("dms.ospserver.net")
-
-    catalog = load_device_catalog() if devices_ok else {}
     flat_devices = flatten_devices(catalog) if devices_ok else []
     total_devices = len(flat_devices)
     category_count = len(catalog)
@@ -946,6 +1066,101 @@ def run_imei_scan(model: str, csc: str, start_imei: str, base: str, attempts: in
     return results, last_hit
 
 
+def is_auth_failed_result(result: dict[str, Any]) -> bool:
+    status = str(result.get("status", "") or "").lower()
+    return "auth_failed" in status or "auth failed" in status
+
+
+def format_imei_status_text(status_value: Any) -> str:
+    raw = str(status_value or "").strip()
+    lower = raw.lower()
+    if "auth_failed" in lower or "auth failed" in lower:
+        return "Auth Didn't Maked!"
+    if "status: 260 (no update)." in lower or "260 (no update)" in lower:
+        return "No Update Maked"
+    if "bad_csc." in lower or "bad_csc" in lower:
+        return "CSC Maked Bad"
+    return raw or "Unknown"
+
+
+def classify_imei_result(result: dict[str, Any]) -> str:
+    kind = str(result.get("kind", "") or "").lower()
+    if kind in {"update", "dm"}:
+        return "HIT"
+    if kind == "uptodate":
+        return "VALID"
+    if format_imei_status_text(result.get("status", "")).lower() == "no update maked":
+        return "VALID"
+    return "ERROR"
+
+
+def init_imei_live_scan_state(request: dict[str, Any]) -> dict[str, Any]:
+    attempts = max(int(request.get("attempts", 1)), 1)
+    step = max(int(request.get("step", 1)), 1)
+    return {
+        "model": request["model"],
+        "csc": request["csc"],
+        "base": request["base"],
+        "attempts": attempts,
+        "step": step,
+        "index": 0,
+        "current_imei": request["start_imei"],
+        "results": [],
+        "hits": [],
+        "last_hit": None,
+        "hit_count": 0,
+        "valid_count": 0,
+        "error_count": 0,
+        "status": "Preparing IMEI scan...",
+        "status_outcome": "",
+        "paused_for_auth": False,
+        "auth_error_label": "",
+        "auth_error_raw": "",
+        "stop_after_index": attempts,
+        "terminated": False,
+    }
+
+
+def finalize_imei_live_scan(
+    state: dict[str, Any],
+    *,
+    terminated: bool = False,
+    termination_reason: str = "",
+) -> None:
+    message = ""
+    if terminated:
+        message = f"The process has been terminated prematurely due to Error {termination_reason}."
+    elif state["stop_after_index"] < state["attempts"]:
+        fallback_reason = termination_reason or "Auth Didn't Maked!"
+        message = f"Scan ended after the extra IMEIs allowed following Error {fallback_reason}."
+
+    st.session_state.imei_scan_results = list(state["results"])
+    st.session_state.imei_last_hit = state.get("last_hit")
+    st.session_state.imei_live_result = {
+        "hits": list(state["hits"]),
+        "attempts": state["attempts"],
+        "processed": state["index"],
+        "model": state["model"],
+        "csc": state["csc"],
+        "base": state["base"],
+        "hit_count": state["hit_count"],
+        "valid_count": state["valid_count"],
+        "error_count": state["error_count"],
+        "terminated": terminated,
+        "termination_reason": termination_reason,
+        "message": message,
+    }
+    st.session_state.imei_live_state = None
+
+    if terminated:
+        push_activity("warn", f"IMEI scan for {state['model']} was terminated due to {termination_reason}.")
+    else:
+        push_activity(
+            "info",
+            f"IMEI scan completed for {state['model']} with {state['hit_count']} hits, {state['valid_count']} valid, and {state['error_count']} errors.",
+        )
+
+
 @st.dialog("Add Device")
 def show_add_device_dialog() -> None:
     with st.form("add_device_dialog_form"):
@@ -1034,7 +1249,6 @@ def show_remove_device_dialog(category: str, device_index: int) -> None:
 
 
 def render_fota_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
-    task = get_task(st.session_state.fota_task_id)
     categories = list(catalog.keys())
     category = st.selectbox("Category", categories, key="fota_category")
     category_devices = catalog.get(category, [])
@@ -1061,6 +1275,8 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         st.session_state.imei_input = selected_device.get("imei", "")
         st.session_state.base_input = selected_device.get("base", "")
 
+    st.caption("Preset values can be edited before fetching. The live request uses the values currently shown in the form.")
+
     with st.form("lookup_form"):
         form_cols = st.columns(2, gap="medium")
         with form_cols[0]:
@@ -1072,18 +1288,7 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         submitted = st.form_submit_button(
             "Fetch Download Link",
             use_container_width=True,
-            disabled=bool(task and task["status"] == "running"),
         )
-
-    if task:
-        if task["status"] == "running":
-            st.info(f"FOTA lookup is running in the background. {task.get('message', 'Working...')}")
-            st.progress(float(task.get("progress", 0.0)))
-        elif task["status"] == "completed" and task.get("result"):
-            st.session_state.last_result = task["result"]
-            st.success("FOTA lookup completed. You can leave this tab and come back without interrupting future tasks.")
-        elif task["status"] == "failed":
-            st.error(task.get("message", "FOTA lookup failed."))
 
     if submitted:
         model = st.session_state.model_input.strip().upper()
@@ -1098,15 +1303,22 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
             st.error("IMEI must be exactly 15 digits.")
             push_activity("error", f"Rejected invalid IMEI input for {model}.")
         else:
-            st.session_state.fota_task_id = start_fota_task(model, csc, imei, base)
-            st.info("FOTA lookup started in the background.")
+            st.session_state.fota_live_request = {
+                "model": model,
+                "csc": csc,
+                "imei": imei,
+                "base": base,
+            }
+            st.session_state.fota_live_result = None
+            st.session_state.fota_live_error = None
             st.rerun()
 
     render_result_panel(st.session_state.last_result)
+    if st.session_state.get("fota_live_request") is not None:
+        show_fota_fetch_dialog()
 
 
 def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
-    task = get_task(st.session_state.imei_task_id)
     categories = list(catalog.keys())
     category = st.selectbox("Scan Category", categories, key="scan_category")
     devices = catalog.get(category, [])
@@ -1116,35 +1328,38 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
     ]
     selected = st.selectbox("Seed Device", labels, key="scan_device")
     device = devices[labels.index(selected)]
+    scan_selected_key = "|".join(
+        [
+            str(device.get("model", "")),
+            str(device.get("csc", "")),
+            str(device.get("imei", "")),
+            str(device.get("base", "")),
+        ]
+    )
+    if st.session_state._scan_selected_device_key != scan_selected_key:
+        st.session_state._scan_selected_device_key = scan_selected_key
+        st.session_state.scan_model = device.get("model", "")
+        st.session_state.scan_imei = device.get("imei", "")
+        st.session_state.scan_csc = device.get("csc", "")
+        st.session_state.scan_base = device.get("base", "")
+
+    st.caption("Selecting a device autofills the scanner. You can still edit the values before running the live scan.")
 
     with st.form("imei_scan_form"):
         cols = st.columns(3, gap="medium")
         with cols[0]:
-            model = st.text_input("Device Model", value=device.get("model", ""), key="scan_model")
-            start_imei = st.text_input("Start IMEI", value=device.get("imei", ""), key="scan_imei")
+            model = st.text_input("Device Model", key="scan_model")
+            start_imei = st.text_input("Start IMEI", key="scan_imei")
         with cols[1]:
-            csc = st.text_input("CSC", value=device.get("csc", ""), key="scan_csc")
-            base = st.text_input("Base Firmware", value=device.get("base", ""), key="scan_base")
+            csc = st.text_input("CSC", key="scan_csc")
+            base = st.text_input("Base Firmware", key="scan_base")
         with cols[2]:
             attempts = st.number_input("Attempts", min_value=1, max_value=50, value=5, step=1, key="scan_attempts")
             step = st.number_input("IMEI Step", min_value=1, max_value=999, value=1, step=1, key="scan_step")
         submitted = st.form_submit_button(
             "Start IMEI Scan",
             use_container_width=True,
-            disabled=bool(task and task["status"] == "running"),
         )
-
-    if task:
-        if task["status"] == "running":
-            st.info(f"IMEI scan is running in the background. {task.get('message', 'Working...')}")
-            st.progress(float(task.get("progress", 0.0)))
-            st.session_state.imei_scan_results = task.get("results", [])
-        elif task["status"] == "completed":
-            st.session_state.imei_scan_results = task.get("results", [])
-            st.session_state.imei_last_hit = task.get("result")
-            st.success(task.get("message", "IMEI scan completed."))
-        elif task["status"] == "failed":
-            st.error(task.get("message", "IMEI scan failed."))
 
     if submitted:
         model = model.strip().upper()
@@ -1157,10 +1372,21 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         elif not start_imei.isdigit() or len(start_imei) != 15:
             st.error("Start IMEI must be exactly 15 digits.")
         else:
-            st.session_state.imei_task_id = start_imei_task(model, csc, start_imei, base, int(attempts), int(step))
-            queue_activity("info", f"IMEI scanner started for {model} with {attempts} attempts.")
-            st.info("IMEI scan started in the background.")
+            st.session_state.imei_scan_results = []
+            st.session_state.imei_last_hit = None
+            st.session_state.imei_live_request = {
+                "model": model,
+                "csc": csc,
+                "start_imei": start_imei,
+                "base": base,
+                "attempts": int(attempts),
+                "step": int(step),
+            }
+            st.session_state.imei_live_result = None
+            st.session_state.imei_live_error = None
             st.rerun()
+
+    st.divider()
 
     if st.session_state.imei_last_hit:
         render_result_panel(st.session_state.imei_last_hit)
@@ -1180,6 +1406,9 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         ],
         "Run a scan to see IMEI results here.",
     )
+
+    if st.session_state.get("imei_live_request") is not None:
+        show_imei_scan_dialog()
 
 
 def render_device_vault_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
@@ -1207,6 +1436,7 @@ def render_device_vault_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
                             <div class="vault-device-line"><strong>Model</strong> {html.escape(item.get('model', 'Unknown'))}</div>
                             <div class="vault-device-line"><strong>CSC</strong> {html.escape(item.get('csc', 'UNK'))}</div>
                             <div class="vault-device-line"><strong>IMEI</strong> {html.escape(mask_imei(item.get('imei', '')))}</div>
+                            <div class="vault-device-line"><strong>Firmware Base</strong> {html.escape(item.get('base', 'Unknown') or 'Unknown')}</div>
                             <div class="vault-device-line"><strong>Latest</strong> {html.escape(latest)}</div>
                         </section>
                         """,
@@ -1221,8 +1451,198 @@ def render_device_vault_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
                             show_remove_device_dialog(category, idx)
 
 
+def render_imei_scan_results(rows: list[dict[str, Any]], category: str, device_index: int) -> None:
+    st.markdown(
+        """
+        <section class="glass-card table-card">
+            <div class="section-kicker">IMEI Scan Results</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+    if not rows:
+        st.info("Run a scan to see IMEI results here.")
+        return
+
+    header_cols = st.columns([0.7, 1.2, 1.2, 0.9, 1.4, 0.9], gap="small")
+    headers = ["Attempt", "IMEI", "Status", "Source", "Firmware", "Action"]
+    for col, label in zip(header_cols, headers):
+        col.markdown(f"<div class='imei-db-header'>{html.escape(label)}</div>", unsafe_allow_html=True)
+
+    for idx, row in enumerate(rows):
+        row_cols = st.columns([0.7, 1.2, 1.2, 0.9, 1.4, 0.9], gap="small")
+        values = [
+            str(row.get("attempt", "")),
+            str(row.get("imei", "")),
+            str(row.get("status", "")),
+            str(row.get("source", "")),
+            short_version(row.get("firmware", "")) if row.get("firmware") else "-",
+        ]
+        for col, value in zip(row_cols[:-1], values):
+            col.markdown(f"<div class='imei-db-cell'>{html.escape(value)}</div>", unsafe_allow_html=True)
+        with row_cols[-1]:
+            if st.button("USE IMEI", key=f"use_scan_imei_{idx}", use_container_width=True):
+                if update_device_imei(category, device_index, str(row.get("imei", "")), "IMEI Scanner"):
+                    st.rerun()
+
+
+def imei_database_rows(
+    catalog: dict[str, list[dict[str, Any]]],
+    model: str,
+    selected_csc: str,
+    current_category: str,
+    current_device: dict[str, Any],
+) -> list[dict[str, Any]]:
+    query = """
+    SELECT device_model, csc, imei, found_pda, timestamp
+    FROM firmware_hits
+    WHERE device_model = ?
+    """
+    params: list[Any] = [model]
+    if selected_csc != "All CSCs":
+        query += " AND csc = ?"
+        params.append(selected_csc)
+    query += " ORDER BY datetime(timestamp) DESC, id DESC"
+
+    rows = with_db(query, tuple(params))
+    combined: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for row in rows:
+        key = (str(row["imei"]), str(row["csc"]))
+        if key in combined:
+            continue
+        combined[key] = {
+            "imei": str(row["imei"]),
+            "csc": str(row["csc"]),
+            "status": "HIT" if row["found_pda"] else "NO",
+            "source": "History",
+            "found_pda": str(row["found_pda"] or "-"),
+            "timestamp": str(row["timestamp"] or "-"),
+            "is_current": False,
+        }
+
+    for category, entries in catalog.items():
+        for entry in entries:
+            if str(entry.get("model", "")).upper() != model.upper():
+                continue
+            entry_csc = str(entry.get("csc", "")).upper()
+            if selected_csc != "All CSCs" and entry_csc != selected_csc:
+                continue
+            entry_imei = str(entry.get("imei", ""))
+            key = (entry_imei, entry_csc)
+            current = category == current_category and entry_imei == str(current_device.get("imei", "")) and entry_csc == str(current_device.get("csc", "")).upper()
+            if key in combined:
+                source = combined[key]["source"]
+                combined[key]["source"] = "Current + History" if current else "Catalog + History"
+                combined[key]["is_current"] = combined[key]["is_current"] or current
+            else:
+                combined[key] = {
+                    "imei": entry_imei,
+                    "csc": entry_csc,
+                    "status": "NO",
+                    "source": "Current Device" if current else "Catalog",
+                    "found_pda": "-",
+                    "timestamp": "-",
+                    "is_current": current,
+                }
+
+    return sorted(
+        combined.values(),
+        key=lambda item: (
+            0 if item["is_current"] else 1,
+            0 if item["status"] == "HIT" else 1,
+            item["csc"],
+            item["imei"],
+        ),
+    )
+
+
+def render_imei_database_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
+    categories = list(catalog.keys())
+    category = st.selectbox("Device Category", categories, key="imei_db_category")
+    devices = catalog.get(category, [])
+    labels = [
+        f"{item.get('name', item.get('model', 'Unknown'))} • {item.get('model', 'Unknown')} • {item.get('csc', 'UNK')}"
+        for item in devices
+    ]
+    selected_label = st.selectbox("Selected Device", labels, key="imei_db_device")
+    device_index = labels.index(selected_label)
+    device = devices[device_index]
+    model = str(device.get("model", "")).upper()
+
+    csc_rows = with_db(
+        "SELECT DISTINCT csc FROM firmware_hits WHERE device_model = ? ORDER BY csc",
+        (model,),
+    )
+    csc_options = ["All CSCs"] + sorted(
+        {
+            str(row["csc"]).upper()
+            for row in csc_rows
+            if row["csc"]
+        }.union(
+            {
+                str(entry.get("csc", "")).upper()
+                for entry in flatten_devices(catalog)
+                if str(entry.get("model", "")).upper() == model and entry.get("csc")
+            }
+        )
+    )
+    if st.session_state.get("imei_db_csc") not in csc_options:
+        st.session_state.imei_db_csc = "All CSCs"
+    selected_csc = st.selectbox("CSC", csc_options, key="imei_db_csc")
+
+    st.caption(
+        f"Selected device: {device.get('name', device.get('model', 'Unknown'))} • "
+        f"{device.get('model', 'Unknown')} • Current IMEI {device.get('imei', 'Unknown')}"
+    )
+
+    rows = imei_database_rows(catalog, model, selected_csc, category, device)
+    st.markdown(
+        """
+        <section class="glass-card table-card">
+            <div class="section-kicker">IMEI Database</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+    if not rows:
+        st.info("No IMEIs were found for this device and CSC selection.")
+        return
+
+    header_cols = st.columns([1.35, 0.8, 0.9, 1.15, 1.35, 1.1, 0.9], gap="small")
+    headers = ["IMEI", "CSC", "Status", "Source", "Latest Firmware", "Timestamp", "Action"]
+    for col, label in zip(header_cols, headers):
+        col.markdown(f"<div class='imei-db-header'>{html.escape(label)}</div>", unsafe_allow_html=True)
+
+    for idx, row in enumerate(rows):
+        row_cols = st.columns([1.35, 0.8, 0.9, 1.15, 1.35, 1.1, 0.9], gap="small")
+        values = [
+            row["imei"],
+            row["csc"],
+            row["status"],
+            row["source"],
+            short_version(row["found_pda"]) if row["found_pda"] and row["found_pda"] != "-" else "-",
+            row["timestamp"],
+        ]
+        for col, value in zip(row_cols[:-1], values):
+            col.markdown(f"<div class='imei-db-cell'>{html.escape(str(value))}</div>", unsafe_allow_html=True)
+        with row_cols[-1]:
+            if st.button("USE IMEI", key=f"imei_db_use_{idx}", use_container_width=True):
+                if update_device_imei(category, device_index, row["imei"], "IMEI Database"):
+                    st.rerun()
+
+
 def render_database_history_tab() -> None:
     rows = history_rows()
+    st.markdown(
+        """
+        <section class="glass-card table-card">
+            <div class="section-kicker">Latest Firmware Discoveries</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
     total_pages = max(1, ceil(len(rows) / 10))
     page_cols = st.columns([1, 4], gap="medium")
     with page_cols[0]:
@@ -1234,14 +1654,6 @@ def render_database_history_tab() -> None:
         )
     start = (page - 1) * 10
     page_rows = rows[start : start + 10]
-    st.markdown(
-        """
-        <section class="glass-card table-card">
-            <div class="section-kicker">Latest Firmware Discoveries</div>
-        </section>
-        """,
-        unsafe_allow_html=True,
-    )
     st.markdown(
         """
         <div class="history-grid-header">
@@ -1317,7 +1729,7 @@ def inject_styles() -> None:
         }
 
         .block-container {
-            padding-top: 6.6rem;
+            padding-top: 2rem;
             padding-bottom: 11rem;
             max-width: 1440px;
         }
@@ -1327,11 +1739,11 @@ def inject_styles() -> None:
         }
 
         .oneui-header {
-            position: fixed;
-            top: 16px;
-            left: var(--content-left);
-            width: var(--content-width);
-            z-index: 1000;
+            position: relative;
+            top: auto;
+            left: auto;
+            width: 100%;
+            z-index: auto;
             padding: 18px 26px;
             border-radius: 30px;
             backdrop-filter: blur(22px);
@@ -1342,6 +1754,7 @@ def inject_styles() -> None:
             align-items: center;
             justify-content: space-between;
             gap: 24px;
+            margin-bottom: 1rem;
         }
 
         .header-title {
@@ -1636,6 +2049,96 @@ def inject_styles() -> None:
             white-space: nowrap;
             text-align: center;
         }
+
+        .imei-db-header {
+            text-align: center;
+            color: #65758f;
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            font-weight: 750;
+            padding: 4px 6px 8px;
+        }
+
+        .imei-db-cell {
+            min-height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            border-radius: 18px;
+            background: rgba(255, 255, 255, 0.48);
+            border: 1px solid rgba(255, 255, 255, 0.74);
+            color: var(--text-main);
+            font-size: 0.92rem;
+            padding: 10px 12px;
+            margin-bottom: 8px;
+            word-break: break-word;
+        }
+
+        .scan-status-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            min-height: 30px;
+            margin-bottom: 4px;
+        }
+
+        .scan-status-main {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-main);
+            font-weight: 650;
+        }
+
+        .scan-spinner {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            border: 2px solid rgba(45, 114, 255, 0.2);
+            border-top-color: #2d72ff;
+            animation: scan-spin 0.8s linear infinite;
+            flex-shrink: 0;
+        }
+
+        .scan-status-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 74px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+        }
+
+        .scan-badge-hit {
+            background: rgba(24, 173, 115, 0.16);
+            color: #0f7f54;
+        }
+
+        .scan-badge-valid {
+            background: rgba(255, 184, 0, 0.18);
+            color: #9a6a00;
+        }
+
+        .scan-badge-error {
+            background: rgba(227, 72, 72, 0.14);
+            color: #b12d2d;
+        }
+
+        .scan-badge-neutral {
+            background: rgba(91, 108, 133, 0.14);
+            color: #44546d;
+        }
+
+        @keyframes scan-spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1888,9 +2391,7 @@ def inject_styles() -> None:
 
         @media (max-width: 760px) {
             .oneui-header {
-                left: 14px;
-                width: calc(100vw - 28px);
-                top: 10px;
+                width: 100%;
                 padding: 16px 18px;
                 border-radius: 24px;
                 flex-direction: column;
@@ -1898,7 +2399,7 @@ def inject_styles() -> None:
             }
 
             .block-container {
-                padding-top: 8.8rem;
+                padding-top: 1rem;
                 padding-bottom: 14rem;
             }
 
@@ -1926,6 +2427,267 @@ def show_download_dialog(payload: dict[str, Any]) -> None:
     st.link_button("Open final URL", payload["download_url"], use_container_width=True)
     if st.button("Close", key="close_dialog", use_container_width=True):
         st.session_state.dialog_payload = None
+        st.rerun()
+
+
+@st.dialog("Fetch Download Link", width="medium")
+def show_fota_fetch_dialog() -> None:
+    request = st.session_state.get("fota_live_request")
+    if not request:
+        st.info("No active FOTA fetch request.")
+        return
+
+    if st.session_state.get("fota_live_result") is None and st.session_state.get("fota_live_error") is None:
+        status_box = st.status("Starting live fetch...", expanded=True)
+        progress = st.progress(0)
+        status_box.write("Checking local cache and preparing the Samsung OTA request...")
+        progress.progress(18)
+        try:
+            status_box.write("Running live FOTA fetch...")
+            progress.progress(42)
+            result = lookup_download_link(
+                request["model"],
+                request["csc"],
+                request["imei"],
+                request.get("base"),
+                use_cache=False,
+            )
+            progress.progress(82)
+            st.session_state.fota_live_result = result
+            st.session_state.last_result = result
+            progress.progress(100)
+            status_box.update(label="Fetch complete", state="complete")
+        except Exception as exc:
+            st.session_state.fota_live_error = str(exc)
+            progress.progress(100)
+            status_box.update(label="Fetch failed", state="error")
+
+    result = st.session_state.get("fota_live_result")
+    error = st.session_state.get("fota_live_error")
+
+    if error:
+        st.error(error)
+    elif result:
+        st.markdown("**Fetch Result**")
+        detail_cols = st.columns(2, gap="medium")
+        with detail_cols[0]:
+            st.markdown("**Model / CSC**")
+            st.code(f"{result.get('model', 'Unknown')} / {result.get('csc', 'UNK')}", language="text")
+            st.markdown("**Base**")
+            st.code(result.get("base", "Unknown") or "Unknown", language="text")
+        with detail_cols[1]:
+            st.markdown("**Found PDA**")
+            st.code(result.get("found_pda", "Unknown") or "Unknown", language="text")
+            st.markdown("**Status**")
+            st.code(result.get("status", "Unknown") or "Unknown", language="text")
+
+        if result.get("kind") in {"update", "dm"} and result.get("curl_command"):
+            st.markdown("**Download Command**")
+            st.code(result["curl_command"], language="bash")
+            st.text_area("curl command", value=result["curl_command"], height=140)
+            action_cols = st.columns(2, gap="medium")
+            with action_cols[0]:
+                st.link_button("Open Raw Link", result["download_url"], use_container_width=True)
+            with action_cols[1]:
+                if st.button("Open Copy Popup", key="open_copy_popup_from_live_fetch", use_container_width=True):
+                    st.session_state.dialog_payload = result
+                    st.rerun()
+        elif result.get("kind") == "uptodate":
+            st.info(result.get("status", "No update found."))
+        else:
+            st.error(result.get("status", "Lookup failed."))
+
+    if st.button("Close", key="close_fota_live_dialog", use_container_width=True):
+        st.session_state.fota_live_request = None
+        st.session_state.fota_live_result = None
+        st.session_state.fota_live_error = None
+        st.rerun()
+
+
+@st.dialog("IMEI Scanner", width="medium")
+def show_imei_scan_dialog() -> None:
+    request = st.session_state.get("imei_live_request")
+    if not request:
+        st.info("No active IMEI scan request.")
+        return
+
+    result = st.session_state.get("imei_live_result")
+    error = st.session_state.get("imei_live_error")
+    state = st.session_state.get("imei_live_state")
+
+    if result is None and error is None and state is None:
+        state = init_imei_live_scan_state(request)
+        st.session_state.imei_live_state = state
+        queue_activity("info", f"IMEI scanner started for {request['model']} with {state['attempts']} attempts.")
+
+    status_placeholder = st.empty()
+    progress_cols = st.columns([7, 1.2], gap="small")
+    with progress_cols[0]:
+        progress_placeholder = st.empty()
+    with progress_cols[1]:
+        percent_placeholder = st.empty()
+    counter_cols = st.columns(3, gap="small")
+    hit_placeholder = counter_cols[0].empty()
+    valid_placeholder = counter_cols[1].empty()
+    error_placeholder = counter_cols[2].empty()
+
+    def render_scan_shell(scan_state: dict[str, Any]) -> None:
+        percent_value = (scan_state["index"] / max(scan_state["attempts"], 1)) * 100
+        badge = ""
+        outcome = scan_state.get("status_outcome", "")
+        if outcome:
+            badge_class = {
+                "HIT": "scan-badge-hit",
+                "VALID": "scan-badge-valid",
+                "ERROR": "scan-badge-error",
+            }.get(outcome, "scan-badge-neutral")
+            badge = f'<span class="scan-status-pill {badge_class}">{html.escape(outcome)}</span>'
+        status_placeholder.markdown(
+            f"""
+            <div class="scan-status-row">
+                <div class="scan-status-main">
+                    <span class="scan-spinner"></span>
+                    <span>{html.escape(scan_state["status"])}</span>
+                </div>
+                <div>{badge}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        progress_placeholder.progress(min(max(percent_value / 100, 0.0), 1.0))
+        percent_placeholder.markdown(
+            f"<div style='text-align:right;padding-top:0.35rem;font-size:0.92rem;color:#233754;font-weight:700;'>{percent_value:.1f}%</div>",
+            unsafe_allow_html=True,
+        )
+        hit_placeholder.markdown(f"🟢 **HIT** - {scan_state['hit_count']}")
+        valid_placeholder.markdown(f"⚠️ **VALID** - {scan_state['valid_count']}")
+        error_placeholder.markdown(f"⛔ **ERROR** - {scan_state['error_count']}")
+
+    if state and result is None and error is None:
+        render_scan_shell(state)
+
+        while state["index"] < state["stop_after_index"] and not state["paused_for_auth"]:
+            current_imei = state["current_imei"]
+            current_attempt = state["index"] + 1
+            state["status"] = f"Scanning {current_imei} ({current_attempt}/{state['attempts']})"
+            state["status_outcome"] = ""
+            render_scan_shell(state)
+
+            try:
+                response = lookup_download_link(
+                    state["model"],
+                    state["csc"],
+                    current_imei,
+                    state["base"],
+                    use_cache=False,
+                )
+            except Exception as exc:
+                response = {
+                    "kind": "error",
+                    "status": str(exc),
+                    "source": "remote",
+                    "found_pda": "",
+                }
+
+            state["results"].append(
+                {
+                    "attempt": str(current_attempt),
+                    "imei": current_imei,
+                    "status": format_imei_status_text(response.get("status", response.get("kind", "Unknown"))),
+                    "source": response.get("source", "remote"),
+                    "firmware": response.get("found_pda", ""),
+                    "kind": response.get("kind", ""),
+                }
+            )
+
+            outcome = classify_imei_result(response)
+            state["status_outcome"] = outcome
+
+            if outcome == "HIT":
+                state["hit_count"] += 1
+                if state["last_hit"] is None:
+                    state["last_hit"] = response
+                state["hits"].append(
+                    {
+                        "imei": current_imei,
+                        "firmware": response.get("found_pda", "Unknown") or "Unknown",
+                    }
+                )
+            elif outcome == "VALID":
+                state["valid_count"] += 1
+            else:
+                state["error_count"] += 1
+
+            state["index"] += 1
+            state["current_imei"] = increment_imei(current_imei, state["step"])
+            render_scan_shell(state)
+
+            if is_auth_failed_result(response):
+                state["paused_for_auth"] = True
+                state["auth_error_label"] = format_imei_status_text(response.get("status", "auth_failed"))
+                state["auth_error_raw"] = str(response.get("status", "auth_failed"))
+                st.session_state.imei_live_state = state
+                break
+
+        if state["index"] >= state["stop_after_index"] and not state["paused_for_auth"]:
+            finalize_imei_live_scan(
+                state,
+                terminated=False,
+                termination_reason=state.get("auth_error_label", ""),
+            )
+            result = st.session_state.get("imei_live_result")
+            state = None
+
+    if error:
+        st.error(error)
+    elif result:
+        if result.get("message"):
+            if result.get("terminated"):
+                st.warning(result["message"])
+            else:
+                st.info(result["message"])
+
+        st.markdown("**Successful IMEIs**")
+        hits = result.get("hits", [])
+        if hits:
+            for hit in hits:
+                st.code(f"{hit['imei']} - Found {hit['firmware']}!", language="text")
+        else:
+            st.info("No IMEIs in this live scan produced an update from the firmware base you entered.")
+
+        summary_cols = st.columns(3, gap="small")
+        with summary_cols[0]:
+            st.markdown(f"🟢 **HIT** - {result.get('hit_count', 0)}")
+        with summary_cols[1]:
+            st.markdown(f"⚠️ **VALID** - {result.get('valid_count', 0)}")
+        with summary_cols[2]:
+            st.markdown(f"⛔ **ERROR** - {result.get('error_count', 0)}")
+    elif state and state.get("paused_for_auth"):
+        st.warning(
+            f"{state['auth_error_label']} Detected. Use VPNs and either continue for 3 more IMEIs or terminate the process."
+        )
+        st.caption(f"Error detail: {state['auth_error_raw']}")
+        action_cols = st.columns(2, gap="medium")
+        with action_cols[0]:
+            if st.button("Continue 3 More IMEIs", key="imei_auth_continue", use_container_width=True):
+                state["paused_for_auth"] = False
+                state["stop_after_index"] = min(state["index"] + 3, state["attempts"])
+                st.session_state.imei_live_state = state
+                st.rerun()
+        with action_cols[1]:
+            if st.button("Terminate Process", key="imei_auth_terminate", use_container_width=True):
+                finalize_imei_live_scan(
+                    state,
+                    terminated=True,
+                    termination_reason=state["auth_error_label"],
+                )
+                st.rerun()
+
+    if st.button("Close", key="close_imei_live_dialog", use_container_width=True):
+        st.session_state.imei_live_request = None
+        st.session_state.imei_live_result = None
+        st.session_state.imei_live_error = None
+        st.session_state.imei_live_state = None
         st.rerun()
 
 
@@ -2009,6 +2771,12 @@ def render_activity_feed() -> None:
     )
 
 
+def poll_running_task(task: dict[str, Any] | None, interval_seconds: float = 0.8) -> None:
+    if task and task.get("status") == "running":
+        time.sleep(interval_seconds)
+        st.rerun()
+
+
 def main() -> None:
     init_state()
     sync_activity_feed()
@@ -2023,6 +2791,7 @@ def main() -> None:
         "Dashboard": "Overview of connectivity, cached firmware intelligence, device readiness, and quick database health.",
         "FOTA Scanner": "Cache-first firmware lookup console for fetching Samsung FOTA download links and copy-ready curl commands.",
         "IMEI Scanner": "Sequential IMEI probing console for testing nearby identifiers against the selected firmware base.",
+        "IMEI Database": "Device-focused IMEI library combining saved presets and firmware history with CSC filters and one-tap IMEI replacement.",
         "Device Vault": "Grouped preset library with masked IMEIs and modal tools to add, edit, or remove device entries.",
         "Database History": "Latest firmware discoveries from the history database, paginated with the newest records first.",
         "Terminal": "Settings placeholder for future deployment integrations and GitHub-connected feedback tools.",
@@ -2108,6 +2877,8 @@ def main() -> None:
         render_fota_tab(catalog)
     elif active_tab == "IMEI Scanner":
         render_imei_scanner_tab(catalog)
+    elif active_tab == "IMEI Database":
+        render_imei_database_tab(catalog)
     elif active_tab == "Device Vault":
         render_device_vault_tab(catalog)
     elif active_tab == "Database History":
