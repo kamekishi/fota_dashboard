@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import socket
 import sqlite3
 import threading
@@ -15,6 +16,7 @@ import xml.etree.ElementTree as ET
 
 import streamlit as st
 
+import dc3
 import ota
 
 
@@ -22,6 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEVICES_PATH = BASE_DIR / "devices.json"
 DB_PATH = BASE_DIR / "fumo_history.db"
 USER_AGENT = "SyncML DM Client"
+ADMIN_SECRET_CODE = "A7K9M2Q4X8P1L6N3R5T7V9Y2B4C6D8F1"
 MAX_ACTIVITY = 10
 TASK_LOCK = threading.Lock()
 TASKS: dict[str, dict[str, Any]] = {}
@@ -29,7 +32,7 @@ ACTIVITY_QUEUE: list[dict[str, str]] = []
 
 
 st.set_page_config(
-    page_title="KinZoKu Dashboard",
+    page_title="Project Killshot",
     page_icon="KZ",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -58,8 +61,14 @@ def init_state() -> None:
         "imei_live_state": None,
         "active_tab": "Dashboard",
         "activity_feed_visible": True,
+        "is_authenticated": False,
+        "user_mode": None,
+        "login_error": None,
         "_selected_device_key": None,
         "_scan_selected_device_key": None,
+        "_decrypt_selected_device_key": None,
+        "decrypt_results": [],
+        "decrypt_error": None,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -144,6 +153,21 @@ def mask_imei(imei: str | None, hidden_digits: int = 7) -> str:
         return "•" * len(raw)
     visible = raw[:-hidden_digits]
     return f"{visible}{'•' * hidden_digits}"
+
+
+def redact_guest_text(text: str) -> str:
+    def replacer(match: re.Match[str]) -> str:
+        return mask_imei(match.group(0))
+
+    return re.sub(r"\b\d{15}\b", replacer, str(text))
+
+
+def current_user_mode() -> str:
+    return str(st.session_state.get("user_mode") or "guest").lower()
+
+
+def is_guest_mode() -> bool:
+    return current_user_mode() == "guest"
 
 
 def increment_imei(imei: str, step: int = 1) -> str:
@@ -703,6 +727,23 @@ def refresh_snapshot(log_message: bool) -> None:
         push_activity("sync", "Dashboard status checks refreshed.")
 
 
+def logout_to_login() -> None:
+    st.session_state.is_authenticated = False
+    st.session_state.user_mode = None
+    st.session_state.login_error = None
+    st.session_state.secret_code_input = ""
+    st.session_state.active_tab = "Dashboard"
+    st.session_state.dialog_payload = None
+    st.session_state.fota_live_request = None
+    st.session_state.fota_live_result = None
+    st.session_state.fota_live_error = None
+    st.session_state.imei_live_request = None
+    st.session_state.imei_live_result = None
+    st.session_state.imei_live_error = None
+    st.session_state.imei_live_state = None
+    st.rerun()
+
+
 def latest_firmware_lookup() -> tuple[dict[tuple[str, str, str], str], dict[tuple[str, str], str]]:
     rows = with_db(
         """
@@ -1021,6 +1062,32 @@ def render_dashboard_cards(snapshot: dict[str, Any]) -> None:
         )
 
 
+def render_guest_dashboard(snapshot: dict[str, Any], catalog: dict[str, list[dict[str, Any]]]) -> None:
+    lower_left, lower_right = st.columns(2, gap="large")
+    with lower_left:
+        render_html_table(
+            "Category Overview",
+            ["Category", "Devices", "Ready"],
+            [list(row) for row in category_rows(catalog)],
+            "No device categories found.",
+        )
+    with lower_right:
+        render_html_table(
+            "Latest Cached Discoveries",
+            ["Model", "CSC", "PDA", "Time"],
+            [
+                [
+                    row["device_model"],
+                    row["csc"],
+                    short_version(row["found_pda"]),
+                    row["timestamp"],
+                ]
+                for row in recent_hits()
+            ],
+            "No firmware history is available yet.",
+        )
+
+
 def render_tool_menu() -> None:
     items = ["FOTA Scanner", "IMEI Scanner", "Device Vault", "Database History", "Terminal"]
     menu_html = "".join(
@@ -1114,6 +1181,7 @@ def init_imei_live_scan_state(request: dict[str, Any]) -> dict[str, Any]:
         "status": "Preparing IMEI scan...",
         "status_outcome": "",
         "paused_for_auth": False,
+        "force_continue": False,
         "auth_error_label": "",
         "auth_error_raw": "",
         "stop_after_index": attempts,
@@ -1248,7 +1316,7 @@ def show_remove_device_dialog(category: str, device_index: int) -> None:
         st.rerun()
 
 
-def render_fota_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
+def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: bool = False) -> None:
     categories = list(catalog.keys())
     category = st.selectbox("Category", categories, key="fota_category")
     category_devices = catalog.get(category, [])
@@ -1275,13 +1343,20 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         st.session_state.imei_input = selected_device.get("imei", "")
         st.session_state.base_input = selected_device.get("base", "")
 
-    st.caption("Preset values can be edited before fetching. The live request uses the values currently shown in the form.")
+    if guest_mode:
+        st.session_state.imei_input = selected_device.get("imei", "")
+        st.caption("Guest Mode keeps the stored IMEI hidden and locked. The selected preset IMEI will be used for the lookup.")
+    else:
+        st.caption("Preset values can be edited before fetching. The live request uses the values currently shown in the form.")
 
     with st.form("lookup_form"):
         form_cols = st.columns(2, gap="medium")
         with form_cols[0]:
             st.text_input("Device Model", key="model_input")
-            st.text_input("IMEI", key="imei_input")
+            if guest_mode:
+                st.text_input("IMEI", value="Locked in Guest Mode", disabled=True)
+            else:
+                st.text_input("IMEI", key="imei_input")
         with form_cols[1]:
             st.text_input("CSC", key="csc_input")
             st.text_input("Base Firmware", key="base_input")
@@ -1293,7 +1368,7 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
     if submitted:
         model = st.session_state.model_input.strip().upper()
         csc = st.session_state.csc_input.strip().upper()
-        imei = st.session_state.imei_input.strip()
+        imei = str(selected_device.get("imei", "")).strip() if guest_mode else st.session_state.imei_input.strip()
         base = st.session_state.base_input.strip()
 
         if not model or not csc or not imei:
@@ -1424,9 +1499,10 @@ def render_device_vault_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         with st.expander(f"{category} ({len(entries)})", expanded=False):
             cols = st.columns(2, gap="medium")
             for idx, item in enumerate(entries):
-                latest = exact_map.get((item.get("model"), item.get("csc"), item.get("imei"))) or fallback_map.get(
-                    (item.get("model"), item.get("csc")),
-                    "No record",
+                latest = (
+                    exact_map.get((item.get("model"), item.get("csc"), item.get("imei")))
+                    or fallback_map.get((item.get("model"), item.get("csc")))
+                    or str(item.get("latest", "") or "No record")
                 )
                 with cols[idx % 2]:
                     st.markdown(
@@ -1449,6 +1525,305 @@ def render_device_vault_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
                     with action_cols[1]:
                         if st.button("Remove", key=f"vault_remove_{category}_{idx}", use_container_width=True):
                             show_remove_device_dialog(category, idx)
+
+
+def guest_device_vault_rows(
+    catalog: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, str]]]:
+    fallback_map = latest_firmware_lookup()[1]
+    rows_by_category: dict[str, list[dict[str, str]]] = {}
+    history_csc_rows = with_db(
+        """
+        SELECT device_model, csc
+        FROM firmware_hits
+        WHERE csc IS NOT NULL AND csc != ''
+        ORDER BY device_model, csc
+        """
+    )
+    history_csc_map: dict[str, set[str]] = {}
+    for row in history_csc_rows:
+        history_csc_map.setdefault(str(row["device_model"]).upper(), set()).add(str(row["csc"]).upper())
+
+    for category, entries in catalog.items():
+        grouped: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            model = str(entry.get("model", "")).upper()
+            grouped.setdefault(
+                model,
+                {
+                    "name": str(entry.get("name", model or "Unknown")),
+                    "model": model or "Unknown",
+                    "cscs": set(),
+                    "bases": set(),
+                    "latest": "",
+                },
+            )
+            if entry.get("csc"):
+                grouped[model]["cscs"].add(str(entry.get("csc", "")).upper())
+            if entry.get("base"):
+                grouped[model]["bases"].add(str(entry.get("base", "")))
+            latest = fallback_map.get((model, str(entry.get("csc", "")).upper()), "") or str(entry.get("latest", "") or "")
+            if latest and not grouped[model]["latest"]:
+                grouped[model]["latest"] = latest
+
+        category_rows: list[dict[str, str]] = []
+        for model, payload in grouped.items():
+            cscs = payload["cscs"].union(history_csc_map.get(model, set()))
+            bases = sorted(payload["bases"])
+            category_rows.append(
+                {
+                    "name": payload["name"],
+                    "model": payload["model"],
+                    "cscs": ", ".join(sorted(cscs)) or "Unknown",
+                    "base": " | ".join(bases) if bases else "Unknown",
+                    "latest": payload["latest"] or "No record",
+                }
+            )
+        rows_by_category[category] = sorted(category_rows, key=lambda item: item["model"])
+    return rows_by_category
+
+
+def render_guest_device_vault_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
+    grouped_rows = guest_device_vault_rows(catalog)
+    for category, rows in grouped_rows.items():
+        with st.expander(f"{category} ({len(rows)})", expanded=False):
+            for row in rows:
+                st.markdown(
+                    f"""
+                    <section class="glass-card vault-device-card guest-vault-card">
+                        <div class="vault-device-name">{html.escape(row['name'])}</div>
+                        <div class="vault-device-line"><strong>Device Model</strong> {html.escape(row['model'])}</div>
+                        <div class="vault-device-line"><strong>Recorded CSCs</strong> {html.escape(row['cscs'])}</div>
+                        <div class="vault-device-line"><strong>Firmware Base</strong> {html.escape(row['base'])}</div>
+                        <div class="vault-device-line"><strong>Latest Found Firmware</strong> {html.escape(row['latest'])}</div>
+                    </section>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+
+def firmware_version_sort_key(version: str | None) -> tuple[int, int, str]:
+    clean = str(version or "")
+    year, month = dc3.parse_date_from_version(clean)
+    pda = clean.split("/")[0] if clean else ""
+    return (year, month, pda)
+
+
+def current_known_firmware(model: str, csc: str, catalog: dict[str, list[dict[str, Any]]]) -> str:
+    _, fallback_map = latest_firmware_lookup()
+    known = fallback_map.get((model, csc), "")
+    if known:
+        return known
+    for entries in catalog.values():
+        for entry in entries:
+            if str(entry.get("model", "")).upper() == model and str(entry.get("csc", "")).upper() == csc:
+                return str(entry.get("base", "") or "")
+    return ""
+
+
+def render_decryption_firmware_list(result: dict[str, Any]) -> None:
+    items = result.get("items", [])
+    if not items:
+        st.info("No decrypted firmware builds were produced for this target.")
+        return
+
+    highlight_version = str(result.get("highlight_version", "") or "")
+    highlight_previous = str(result.get("current_known", "") or "")
+    if highlight_version:
+        message = f"Latest Firmware: {highlight_version}"
+        if highlight_previous:
+            message += f" • newer than recorded {highlight_previous}"
+        st.markdown(
+            f"""
+            <section class="glass-card decrypt-highlight-card">
+                <div class="section-kicker">Latest Firmware</div>
+                <div class="result-title">{html.escape(highlight_version)}</div>
+                <div class="result-meta">{html.escape(message)}</div>
+            </section>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    total_pages = max(1, ceil(len(items) / 10))
+    page_cols = st.columns([1, 4], gap="medium")
+    with page_cols[0]:
+        page = st.number_input(
+            "Page",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            key=f"decrypt_page_{result.get('model', 'UNK')}_{result.get('region', 'UNK')}",
+        )
+    with page_cols[1]:
+        st.markdown(
+            f"<div class='history-page-note'>Showing page {page} of {total_pages} • 10 firmware entries per page</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        """
+        <div class="decrypt-list-header">
+            <span>Date</span>
+            <span>Kind</span>
+            <span>Triplet</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    start = (page - 1) * 10
+    page_items = items[start : start + 10]
+    for item in page_items:
+        version = str(item.get("version", "Unknown"))
+        row_class = "decrypt-list-row latest" if version == highlight_version else "decrypt-list-row"
+        year = int(item.get("year", 0) or 0)
+        month = int(item.get("month", 0) or 0)
+        date_label = f"{year}-{month:02d}" if year and month else "-"
+        kind = str(item.get("kind", "unknown"))
+        latest_pill = "<span class='decrypt-pill'>Latest</span>" if version == highlight_version else ""
+        st.markdown(
+            f"""
+            <div class="{row_class}">
+                <span>{html.escape(date_label)}</span>
+                <span>{html.escape(kind)}</span>
+                <span>{html.escape(version)} {latest_pill}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
+    st.markdown(
+        """
+        <div style="margin-bottom:0.85rem;">
+            <span class="pill badge-indigo" style="font-size:1.6rem;padding:0.8rem 1.4rem;border-radius:999px;">Decryption Tool</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption("Please input the device's model number and CSC to begin the decryption process.")
+
+    with st.form("decryption_form"):
+        form_cols = st.columns(2, gap="medium")
+        with form_cols[0]:
+            st.text_input("Device Model", key="decrypt_model_input")
+        with form_cols[1]:
+            st.text_input("CSC", key="decrypt_csc_input")
+        submitted = st.form_submit_button("Start Decryption", use_container_width=True)
+
+    if submitted:
+        model = st.session_state.decrypt_model_input.strip().upper()
+        csc = st.session_state.decrypt_csc_input.strip().upper()
+        if not model or not csc:
+            st.error("Model and CSC are required.")
+        else:
+            status_placeholder = st.empty()
+            progress_placeholder = st.empty()
+            progress_text = st.empty()
+
+            def progress_callback(stage: str, completed: int, total: int, label: str) -> None:
+                total_steps = max(total, 1)
+                ratio = min(max(completed / total_steps, 0.0), 1.0)
+                stage_title = {
+                    "prepare": "Preparing server MD5 list",
+                    "decrypt": "Decrypting firmware map",
+                    "finalize": "Saving output files",
+                }.get(stage, stage.title())
+                status_placeholder.markdown(f"**{html.escape(stage_title)}**  \n`{html.escape(label)}`")
+                progress_placeholder.progress(ratio)
+                progress_text.caption(f"{ratio * 100:.1f}% complete")
+
+            try:
+                normalized_model = dc3.norm_model(model)
+                normalized_csc = dc3.norm_csc(csc)
+                progress_callback("prepare", 0, 1, f"{normalized_model}/{normalized_csc}")
+                server_md5s = dc3.get_md5_list(normalized_model, normalized_csc)
+                if not server_md5s:
+                    raise RuntimeError("No firmware list was returned for this device and CSC.")
+                latest_version, osver, base_cc = dc3.get_latest_with_fallback(normalized_model, normalized_csc)
+                decrypted_map = dc3.decrypt_firmware(
+                    normalized_model,
+                    normalized_csc,
+                    set(server_md5s),
+                    latest_version,
+                    full_brute=True,
+                    progress_callback=progress_callback,
+                )
+                sorted_items = sorted(
+                    decrypted_map.values(),
+                    key=lambda item: (
+                        int(item.get("year", 0) or 0),
+                        int(item.get("month", 0) or 0),
+                        str(item.get("version", "")),
+                    ),
+                    reverse=True,
+                )
+                recorded = current_known_firmware(normalized_model, normalized_csc, catalog)
+                latest_found = str(sorted_items[0].get("version", "")) if sorted_items else ""
+                highlight_version = ""
+                if latest_found and (
+                    not recorded or firmware_version_sort_key(latest_found) > firmware_version_sort_key(recorded)
+                ):
+                    highlight_version = latest_found
+                st.session_state.decrypt_results = [
+                    {
+                        "model": normalized_model,
+                        "region": normalized_csc,
+                        "latest_stable": latest_version,
+                        "android": osver,
+                        "base_csc": base_cc,
+                        "server_md5s": len(server_md5s),
+                        "resolved_count": len(sorted_items),
+                        "unresolved_count": max(0, len(server_md5s) - len(sorted_items)),
+                        "items": sorted_items,
+                        "current_known": recorded,
+                        "highlight_version": highlight_version,
+                    }
+                ]
+                st.session_state.decrypt_error = None
+                push_activity("info", f"Decryption scan completed for {normalized_model} / {normalized_csc}.")
+                if not sorted_items:
+                    st.info("No decrypted firmware builds were produced for this target.")
+            except Exception as exc:
+                st.session_state.decrypt_results = []
+                st.session_state.decrypt_error = str(exc)
+                push_activity("error", f"Decryption failed for {model} / {csc}: {exc}")
+                st.error(str(exc))
+
+    error = st.session_state.get("decrypt_error")
+    results = st.session_state.get("decrypt_results", [])
+    if error:
+        st.error(error)
+
+    if results:
+        for idx, result in enumerate(results):
+            st.markdown(
+                f"""
+                <section class="glass-card result-card">
+                    <div class="result-top">
+                        <div>
+                            <div class="section-kicker">Decryption Result</div>
+                            <div class="result-title">{html.escape(result.get('model', 'Unknown'))} / {html.escape(result.get('region', 'UNK'))}</div>
+                            <div class="result-meta">Base CSC: {html.escape(result.get('base_csc') or result.get('region', 'UNK'))} • Android: {html.escape(result.get('android') or 'Unknown')}</div>
+                        </div>
+                        <span class="pill badge-indigo">{result.get('resolved_count', 0)} Resolved</span>
+                    </div>
+                </section>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.divider()
+            info_cols = st.columns(4, gap="medium")
+            info_cols[0].metric("Latest Stable", short_version(result.get("latest_stable") or ""))
+            info_cols[1].metric("Server MD5s", str(result.get("server_md5s", 0)))
+            info_cols[2].metric("Resolved", str(result.get("resolved_count", 0)))
+            info_cols[3].metric("Unresolved", str(result.get("unresolved_count", 0)))
+            if result.get("current_known"):
+                st.caption(f"Recorded firmware: {result.get('current_known')}")
+            render_decryption_firmware_list(result)
+            if idx < len(results) - 1:
+                st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
 
 
 def render_imei_scan_results(rows: list[dict[str, Any]], category: str, device_index: int) -> None:
@@ -1593,7 +1968,7 @@ def render_imei_database_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
 
     st.caption(
         f"Selected device: {device.get('name', device.get('model', 'Unknown'))} • "
-        f"{device.get('model', 'Unknown')} • Current IMEI {device.get('imei', 'Unknown')}"
+        f"{device.get('model', 'Unknown')} • Current IMEI {mask_imei(str(device.get('imei', 'Unknown')))}"
     )
 
     rows = imei_database_rows(catalog, model, selected_csc, category, device)
@@ -1617,7 +1992,7 @@ def render_imei_database_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
     for idx, row in enumerate(rows):
         row_cols = st.columns([1.35, 0.8, 0.9, 1.15, 1.35, 1.1, 0.9], gap="small")
         values = [
-            row["imei"],
+            mask_imei(row["imei"]),
             row["csc"],
             row["status"],
             row["source"],
@@ -1692,7 +2067,18 @@ def render_database_history_tab() -> None:
                 show_history_detail_dialog(dict(row))
 
 
-def render_terminal_tab() -> None:
+def render_terminal_tab(snapshot_text: str) -> None:
+    st.markdown(
+        f"""
+        <section class="glass-card table-card">
+            <div class="section-kicker">Snapshot</div>
+            <div class="dashboard-big-number small">{html.escape(snapshot_text)}</div>
+            <div class="progress-caption">The latest dashboard health snapshot is shown here for admin review.</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
     st.toggle("Enable experimental feedback routing", value=False, disabled=True)
     st.text_area(
         "Feedback draft",
@@ -1700,6 +2086,71 @@ def render_terminal_tab() -> None:
         height=140,
         disabled=True,
     )
+
+
+def render_login_page() -> None:
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] { display: none; }
+        .login-shell {
+            max-width: 540px;
+            margin: 10vh auto 0;
+        }
+        .login-card {
+            padding: 30px 28px;
+        }
+        .login-title {
+            font-size: 2rem;
+            font-weight: 800;
+            letter-spacing: -0.04em;
+            color: var(--text-main);
+        }
+        .login-subtitle {
+            margin-top: 10px;
+            color: var(--text-soft);
+            line-height: 1.6;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+        <div class="login-shell">
+            <section class="glass-card login-card">
+                <div class="login-title">KinZoKu Access</div>
+                <div class="login-subtitle">Enter the secret code for Admin Mode, or continue as a guest with the limited surface.</div>
+            </section>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
+    st.text_input("Secret Code", key="secret_code_input", type="password")
+    if st.session_state.get("login_error"):
+        st.error(str(st.session_state.get("login_error")))
+
+    action_cols = st.columns(2, gap="medium")
+    with action_cols[0]:
+        if st.button("Enter", key="enter_admin_mode", use_container_width=True):
+            if st.session_state.get("secret_code_input", "") == ADMIN_SECRET_CODE:
+                st.session_state.is_authenticated = True
+                st.session_state.user_mode = "admin"
+                st.session_state.login_error = None
+                st.session_state.active_tab = "Dashboard"
+                push_activity("info", "Admin Mode activated.")
+                st.rerun()
+            st.session_state.login_error = "Secret Code not accepted."
+            st.rerun()
+    with action_cols[1]:
+        if st.button("Enter as Guest", key="enter_guest_mode", use_container_width=True):
+            st.session_state.is_authenticated = True
+            st.session_state.user_mode = "guest"
+            st.session_state.login_error = None
+            st.session_state.active_tab = "Dashboard"
+            push_activity("info", "Guest Mode activated.")
+            st.rerun()
     st.button("Send Feedback", disabled=True, use_container_width=True)
 
 
@@ -1996,6 +2447,69 @@ def inject_styles() -> None:
         .vault-device-card {
             padding-bottom: 14px;
             margin-bottom: 0.55rem;
+        }
+
+        .guest-vault-card {
+            min-height: 0 !important;
+            height: auto !important;
+            padding-top: 18px;
+            padding-bottom: 12px;
+        }
+
+        .decrypt-highlight-card {
+            margin: 0 0 14px 0;
+            border: 1px solid rgba(45, 114, 255, 0.24);
+            background: linear-gradient(135deg, rgba(45, 114, 255, 0.10), rgba(99, 187, 255, 0.12));
+        }
+
+        .decrypt-list-header {
+            display: grid;
+            grid-template-columns: 0.72fr 0.9fr 3fr;
+            gap: 12px;
+            padding: 0 12px 10px 12px;
+            color: #65758f;
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            font-weight: 700;
+            text-align: center;
+        }
+
+        .decrypt-list-row {
+            display: grid;
+            grid-template-columns: 0.72fr 0.9fr 3fr;
+            gap: 12px;
+            align-items: center;
+            padding: 12px;
+            margin-bottom: 10px;
+            border-radius: 22px;
+            background: rgba(255, 255, 255, 0.58);
+            border: 1px solid rgba(255, 255, 255, 0.86);
+        }
+
+        .decrypt-list-row span {
+            color: var(--text-main);
+            font-size: 0.92rem;
+            text-align: center;
+            word-break: break-word;
+        }
+
+        .decrypt-list-row.latest {
+            border-color: rgba(45, 114, 255, 0.3);
+            background: linear-gradient(135deg, rgba(45, 114, 255, 0.08), rgba(99, 187, 255, 0.12));
+        }
+
+        .decrypt-pill {
+            display: inline-flex;
+            margin-left: 8px;
+            padding: 4px 8px;
+            border-radius: 999px;
+            background: rgba(24, 173, 115, 0.16);
+            color: #0f7f54;
+            font-size: 0.74rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            vertical-align: middle;
         }
 
         .vault-device-name {
@@ -2361,6 +2875,9 @@ def inject_styles() -> None:
         }
 
         div[role="radiogroup"] label {
+            width: 100%;
+            box-sizing: border-box;
+            display: flex;
             border-radius: 22px;
             padding: 12px 14px;
             font-weight: 700;
@@ -2622,7 +3139,7 @@ def show_imei_scan_dialog() -> None:
             state["current_imei"] = increment_imei(current_imei, state["step"])
             render_scan_shell(state)
 
-            if is_auth_failed_result(response):
+            if is_auth_failed_result(response) and not state.get("force_continue", False):
                 state["paused_for_auth"] = True
                 state["auth_error_label"] = format_imei_status_text(response.get("status", "auth_failed"))
                 state["auth_error_raw"] = str(response.get("status", "auth_failed"))
@@ -2667,14 +3184,21 @@ def show_imei_scan_dialog() -> None:
             f"{state['auth_error_label']} Detected. Use VPNs and either continue for 3 more IMEIs or terminate the process."
         )
         st.caption(f"Error detail: {state['auth_error_raw']}")
-        action_cols = st.columns(2, gap="medium")
+        action_cols = st.columns(3, gap="medium")
         with action_cols[0]:
-            if st.button("Continue 3 More IMEIs", key="imei_auth_continue", use_container_width=True):
+            if st.button("Continue", key="imei_auth_continue", use_container_width=True):
                 state["paused_for_auth"] = False
                 state["stop_after_index"] = min(state["index"] + 3, state["attempts"])
                 st.session_state.imei_live_state = state
                 st.rerun()
         with action_cols[1]:
+            if st.button("Force Continue", key="imei_auth_force_continue", use_container_width=True):
+                state["paused_for_auth"] = False
+                state["force_continue"] = True
+                state["stop_after_index"] = state["attempts"]
+                st.session_state.imei_live_state = state
+                st.rerun()
+        with action_cols[2]:
             if st.button("Terminate Process", key="imei_auth_terminate", use_container_width=True):
                 finalize_imei_live_scan(
                     state,
@@ -2747,12 +3271,13 @@ def render_activity_feed() -> None:
         return
 
     items = st.session_state.activity_feed or [{"time": "--:--:--", "level": "INFO", "message": "Dashboard is ready."}]
+    guest_mode = is_guest_mode()
     items_html = "".join(
         f"""
         <div class="activity-item">
             <span class="activity-time">{html.escape(item['time'])}</span>
             <span class="pill {level_badge(item['level'])}">{html.escape(item['level'])}</span>
-            <span class="activity-message">{html.escape(item['message'])}</span>
+            <span class="activity-message">{html.escape(redact_guest_text(item['message']) if guest_mode else item['message'])}</span>
         </div>
         """
         for item in items[:2]
@@ -2782,24 +3307,42 @@ def main() -> None:
     sync_activity_feed()
     inject_styles()
 
+    if not st.session_state.get("is_authenticated"):
+        render_login_page()
+        return
+
     if st.session_state.snapshot_time is None:
         refresh_snapshot(log_message=False)
         push_activity("info", "Dashboard initialized with cache-first lookup mode.")
 
     catalog = load_device_catalog()
-    tab_descriptions = {
-        "Dashboard": "Overview of connectivity, cached firmware intelligence, device readiness, and quick database health.",
-        "FOTA Scanner": "Cache-first firmware lookup console for fetching Samsung FOTA download links and copy-ready curl commands.",
-        "IMEI Scanner": "Sequential IMEI probing console for testing nearby identifiers against the selected firmware base.",
-        "IMEI Database": "Device-focused IMEI library combining saved presets and firmware history with CSC filters and one-tap IMEI replacement.",
-        "Device Vault": "Grouped preset library with masked IMEIs and modal tools to add, edit, or remove device entries.",
-        "Database History": "Latest firmware discoveries from the history database, paginated with the newest records first.",
-        "Terminal": "Settings placeholder for future deployment integrations and GitHub-connected feedback tools.",
-    }
+    guest_mode = is_guest_mode()
+    if guest_mode:
+        tab_descriptions = {
+            "Dashboard": "Overview of the whole system with select details redacted and limited to cached intelligence.",
+            "FOTA Scanner": "Firmware fetching system powered by buteforce lookups and live Samsung OTA requests, limited to cached results in guest mode.",
+            "Decryption": "Firmware tool to decrypt Samsung firmware packages including internal builds by bruteforcing model number & CSC combinations.",
+            "Device Vault": "Library of devices available for OTA fetching in the FOTA Scanner.",
+        }
+    else:
+        tab_descriptions = {
+            "Dashboard": "Overview of connectivity, cached firmware intelligence, device readiness, and quick database health.",
+            "FOTA Scanner": "Cache-first firmware lookup console for fetching Samsung FOTA download links and copy-ready curl commands.",
+            "Decryption": "Firmware decryption workspace powered by dc3.py for enumerating builds for a device model and CSC.",
+            "IMEI Scanner": "Sequential IMEI probing console for testing nearby identifiers against the selected firmware base.",
+            "IMEI Database": "Device-focused IMEI library combining saved presets and firmware history with CSC filters and one-tap IMEI replacement.",
+            "Device Vault": "Grouped preset library with masked IMEIs and modal tools to add, edit, or remove device entries.",
+            "Database History": "Latest firmware discoveries from the history database, paginated with the newest records first.",
+            "Terminal": "Settings placeholder for future deployment integrations and GitHub-connected feedback tools.",
+        }
     tab_names = list(tab_descriptions.keys())
 
     active_tab = st.session_state.get("active_tab", "Dashboard")
+    if active_tab not in tab_names:
+        active_tab = "Dashboard"
+        st.session_state.active_tab = active_tab
     snapshot_text = st.session_state.snapshot_time.strftime("%Y-%m-%d %H:%M:%S") if st.session_state.snapshot_time else "Pending"
+    mode_label = "Admin Mode" if not guest_mode else "Guest Mode"
     st.markdown(
         f"""
         <div class="oneui-header">
@@ -2807,7 +3350,7 @@ def main() -> None:
                 <div class="header-title">Project Killshot Dashboard</div>
                 <div class="header-subtitle">{html.escape(tab_descriptions[active_tab])}</div>
             </div>
-            <div class="header-chip">Snapshot: {snapshot_text}</div>
+            <div class="header-chip">User Mode: {mode_label}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -2834,57 +3377,65 @@ def main() -> None:
         )
         st.markdown("<div class='left-pane-footer'></div>", unsafe_allow_html=True)
         activity_label = "Hide Activity Feed" if st.session_state.activity_feed_visible else "Show Activity Feed"
-        footer_cols = st.columns([1.8, 1], gap="small")
-        with footer_cols[0]:
-            if st.button(activity_label, key="left_pane_activity_toggle", use_container_width=True):
-                st.session_state.activity_feed_visible = not st.session_state.activity_feed_visible
-                st.rerun()
+        if st.button(activity_label, key="left_pane_activity_toggle", use_container_width=True):
+            st.session_state.activity_feed_visible = not st.session_state.activity_feed_visible
+            st.rerun()
+        if st.button("Logout", key="left_pane_logout", use_container_width=True):
+            logout_to_login()
 
     if active_tab == "Dashboard":
-        top_action_cols = st.columns([4.5, 1.2], gap="medium")
-        with top_action_cols[1]:
-            if st.button("↻ Refresh Dashboard", key="header_refresh_dashboard", use_container_width=True):
-                refresh_snapshot(log_message=True)
-                st.rerun()
-
-        render_dashboard_cards(st.session_state.status_snapshot)
-        st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
-        lower_left, lower_right = st.columns(2, gap="large")
-        with lower_left:
-            render_html_table(
-                "Category Overview",
-                ["Category", "Devices", "Ready"],
-                [list(row) for row in category_rows(catalog)],
-                "No device categories found.",
-            )
-        with lower_right:
-            render_html_table(
-                "Latest Cached Discoveries",
-                ["Model", "CSC", "IMEI", "PDA", "Time"],
-                [
+        if guest_mode:
+            render_guest_dashboard(st.session_state.status_snapshot, catalog)
+        else:
+            top_action_cols = st.columns([4.5, 1.2], gap="medium")
+            with top_action_cols[1]:
+                if st.button("↻ Refresh Dashboard", key="header_refresh_dashboard", use_container_width=True):
+                    refresh_snapshot(log_message=True)
+                    st.rerun()
+            # Admin mode keeps the full dashboard card set and detailed tables.
+            render_dashboard_cards(st.session_state.status_snapshot)
+            st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
+            lower_left, lower_right = st.columns(2, gap="large")
+            with lower_left:
+                render_html_table(
+                    "Category Overview",
+                    ["Category", "Devices", "Ready"],
+                    [list(row) for row in category_rows(catalog)],
+                    "No device categories found.",
+                )
+            with lower_right:
+                render_html_table(
+                    "Latest Cached Discoveries",
+                    ["Model", "CSC", "IMEI", "PDA", "Time"],
                     [
-                        row["device_model"],
-                        row["csc"],
-                        mask_imei(row["imei"], hidden_digits=4),
-                        short_version(row["found_pda"]),
-                        row["timestamp"],
-                    ]
-                    for row in recent_hits()
-                ],
-                "No firmware history is available yet.",
-            )
+                        [
+                            row["device_model"],
+                            row["csc"],
+                            mask_imei(row["imei"], hidden_digits=4),
+                            short_version(row["found_pda"]),
+                            row["timestamp"],
+                        ]
+                        for row in recent_hits()
+                    ],
+                    "No firmware history is available yet.",
+                )
     elif active_tab == "FOTA Scanner":
-        render_fota_tab(catalog)
-    elif active_tab == "IMEI Scanner":
+        render_fota_tab(catalog, guest_mode=guest_mode)
+    elif active_tab == "Decryption":
+        render_decryption_tab(catalog)
+    elif active_tab == "IMEI Scanner" and not guest_mode:
         render_imei_scanner_tab(catalog)
-    elif active_tab == "IMEI Database":
+    elif active_tab == "IMEI Database" and not guest_mode:
         render_imei_database_tab(catalog)
     elif active_tab == "Device Vault":
-        render_device_vault_tab(catalog)
-    elif active_tab == "Database History":
+        if guest_mode:
+            render_guest_device_vault_tab(catalog)
+        else:
+            render_device_vault_tab(catalog)
+    elif active_tab == "Database History" and not guest_mode:
         render_database_history_tab()
-    elif active_tab == "Terminal":
-        render_terminal_tab()
+    elif active_tab == "Terminal" and not guest_mode:
+        render_terminal_tab(snapshot_text)
 
     if st.session_state.dialog_payload:
         show_download_dialog(st.session_state.dialog_payload)
