@@ -2,6 +2,8 @@ streamlit
 requests
 urllib3
 rich
+lxml
+InquirerPy
 google-api-python-client
 google-auth
 google-auth-httplib2
