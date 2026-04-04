@@ -1,0 +1,9 @@
+[
+    {
+        "imei": "355066960054833",
+        "csc": "INS",
+        "fw": "S901EXXUDHZB5/S901EOXMDHZB5/S901EXXUDHZB5",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=b7f8600bb86749898ab18ddb0d92e493&workId=1919922-WSA260213190421&pkgID=FW2026021352275788&crtDt=20260213190421&modemZeroBilling=1&aidCode=INS",
+        "date": "2026-02-13 20:04:21"
+    }
+]

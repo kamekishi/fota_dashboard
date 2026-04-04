@@ -1,0 +1,16 @@
+[
+    {
+        "imei": "350933070001084",
+        "csc": "XSA",
+        "fw": "S948BXXU1AZCD.DM/S948BOXM1AZCD/S948BXXU1AZCD",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=874e443a48e049cf94aee86d42021b80&workId=7838058-WSA260327022923&pkgID=FW2026031552840366&crtDt=20260327022923&modemZeroBilling=1&aidCode=XSA",
+        "date": "2026-03-27 10:29:24"
+    },
+    {
+        "imei": "350933070001092",
+        "csc": "XSA",
+        "fw": "S948BXXU1AZCD.DM/S948BOXM1AZCD/S948BXXU1AZCD",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=eebbd170cd9f4825949e50d37cce8f62&workId=3088834-WSA260327022923&pkgID=FW2026031552840366&crtDt=20260327022923&modemZeroBilling=1&aidCode=XSA",
+        "date": "2026-03-27 10:29:24"
+    }
+]

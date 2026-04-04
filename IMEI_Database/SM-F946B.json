@@ -1,0 +1,58 @@
+[
+    {
+        "imei": "350022680020781",
+        "csc": "INS",
+        "fw": "F946BXXU6GZC3.DM/F946BOXM6GZC3/F946BXXU6GZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=1eb1ef618dd441c4b616126896e00ec6&workId=9325041-WSA260310160638&pkgID=FW2026030552568734&crtDt=20260310160638&modemZeroBilling=1&aidCode=INS",
+        "date": "2026-03-11 00:06:39"
+    },
+    {
+        "imei": "350022680020799",
+        "csc": "INS",
+        "fw": "F946BXXU6GZC3.DM/F946BOXM6GZC3/F946BXXU6GZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=a717a77b1c56403d9d3d4b4235ad608a&workId=3716954-WSA260310160640&pkgID=FW2026030552568734&crtDt=20260310160640&modemZeroBilling=1&aidCode=INS",
+        "date": "2026-03-11 00:06:41"
+    },
+    {
+        "imei": "350022680020856",
+        "csc": "INS",
+        "fw": "F946BXXU6GZC3.DM/F946BOXM6GZC3/F946BXXU6GZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=02df61a57404425ea37af89e7aa502a3&workId=1856599-WSA260310160651&pkgID=FW2026030552568734&crtDt=20260310160651&modemZeroBilling=1&aidCode=INS",
+        "date": "2026-03-11 00:06:52"
+    },
+    {
+        "imei": "350022680020898",
+        "csc": "INS",
+        "fw": "F946BXXU6GZC3.DM/F946BOXM6GZC3/F946BXXU6GZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=51740c96a3c449ff932a7fcf765588a3&workId=4385791-WSA260310160659&pkgID=FW2026030552568734&crtDt=20260310160659&modemZeroBilling=1&aidCode=INS",
+        "date": "2026-03-11 00:06:59"
+    },
+    {
+        "imei": "350022680020989",
+        "csc": "INS",
+        "fw": "F946BXXU6GZC3.DM/F946BOXM6GZC3/F946BXXU6GZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=8e3f0fc138c74f8fb260d39bf9485376&workId=1038794-WSA260310160714&pkgID=FW2026030552568734&crtDt=20260310160714&modemZeroBilling=1&aidCode=INS",
+        "date": "2026-03-11 00:07:15"
+    },
+    {
+        "imei": "350022680021003",
+        "csc": "INS",
+        "fw": "F946BXXU6GZC3.DM/F946BOXM6GZC3/F946BXXU6GZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=ac01c318b7b842c6b0b8b7f95eb30242&workId=2278791-WSA260310160718&pkgID=FW2026030552568734&crtDt=20260310160718&modemZeroBilling=1&aidCode=INS",
+        "date": "2026-03-11 00:07:19"
+    },
+    {
+        "imei": "350022680021011",
+        "csc": "INS",
+        "fw": "F946BXXU6GZC3.DM/F946BOXM6GZC3/F946BXXU6GZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=1f56f0a95a2c4687b7880315bc5256ba&workId=4314969-WSA260310160721&pkgID=FW2026030552568734&crtDt=20260310160721&modemZeroBilling=1&aidCode=INS",
+        "date": "2026-03-11 00:07:21"
+    },
+    {
+        "imei": "350022680021029",
+        "csc": "INS",
+        "fw": "F946BXXU6GZC3.DM/F946BOXM6GZC3/F946BXXU6GZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=0588057fbf8c4f6d86cc560fb2f6ae17&workId=0226705-WSA260310160723&pkgID=FW2026030552568734&crtDt=20260310160723&modemZeroBilling=1&aidCode=INS",
+        "date": "2026-03-11 00:07:24"
+    }
+]

@@ -1,0 +1,9 @@
+[
+    {
+        "imei": "350730230009670",
+        "csc": "VZW",
+        "fw": "S938U1UEU8CZB5/S938U1OYM8CZB5/S938U1UEU8CZB5",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=121981d22e4b4f77bb445c139026d4a3&workId=1972773-WSA260213183410&pkgID=FW2026021352224289&crtDt=20260213183410&modemZeroBilling=1&aidCode=VZW",
+        "date": "2026-02-13 19:34:10"
+    }
+]

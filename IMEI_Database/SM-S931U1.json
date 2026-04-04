@@ -1,0 +1,23 @@
+[
+    {
+        "imei": "350135000015164",
+        "csc": "XAA",
+        "fw": "S931U1UES8BYLV.DM/S931U1OYM8BYLV/S931U1UES8BYLV",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=f5d5759191ce4410a48fa6303b75fd0d&workId=6265376-WSA260212075421&pkgID=FW2026020652061013&crtDt=20260212075421&modemZeroBilling=1&aidCode=XAA",
+        "date": "2026-02-12 08:54:22"
+    },
+    {
+        "imei": "350135000015552",
+        "csc": "XAA",
+        "fw": "S931U1UES8BYLV.DM/S931U1OYM8BYLV/S931U1UES8BYLV",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=a53c9a2c14ae4692b0ed5cfd0bf3f969&workId=3627671-WSA260212075812&pkgID=FW2026020652061013&crtDt=20260212075812&modemZeroBilling=1&aidCode=XAA",
+        "date": "2026-02-12 08:58:12"
+    },
+    {
+        "imei": "350135000015594",
+        "csc": "XAA",
+        "fw": "S931U1UES8BYLV.DM/S931U1OYM8BYLV/S931U1UES8BYLV",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=0bc213d347534fe69b1400b4c0a2d54b&workId=5926947-WSA260212190350&pkgID=FW2026020652061013&crtDt=20260212190350&modemZeroBilling=1&aidCode=XAA",
+        "date": "2026-02-12 20:03:50"
+    }
+]

@@ -1,0 +1,37 @@
+[
+    {
+        "imei": "351478610252747",
+        "csc": "EUX",
+        "fw": "S937BXXU6CZC3.DM/S937BOXM6CZC3/S937BXXU6CZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=17aef12fb5f2475db871b5c22e3c393f&workId=8810268-WSA260310153944&pkgID=FW2026030552561313&crtDt=20260310153944&modemZeroBilling=1&aidCode=EUX",
+        "date": "2026-03-10 23:39:45"
+    },
+    {
+        "imei": "351478610252770",
+        "csc": "EUX",
+        "fw": "S937BXXU6CZC3.DM/S937BOXM6CZC3/S937BXXU6CZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=862982f651af4a27952cb41f992b14bf&workId=1657092-WSA260310153946&pkgID=FW2026030552561313&crtDt=20260310153946&modemZeroBilling=1&aidCode=EUX",
+        "date": "2026-03-10 23:39:47"
+    },
+    {
+        "imei": "351478610252960",
+        "csc": "EUX",
+        "fw": "S937BXXU6CZC3.DM/S937BOXM6CZC3/S937BXXU6CZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=a8622861bcfe45b09a2c6a4e2d3d72e2&workId=9427248-WSA260310153954&pkgID=FW2026030552561313&crtDt=20260310153954&modemZeroBilling=1&aidCode=EUX",
+        "date": "2026-03-10 23:39:55"
+    },
+    {
+        "imei": "351478610252994",
+        "csc": "EUX",
+        "fw": "S937BXXU6CZC3.DM/S937BOXM6CZC3/S937BXXU6CZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=3b64eeae160242fc9696216572206e4f&workId=3027448-WSA260310153956&pkgID=FW2026030552561313&crtDt=20260310153956&modemZeroBilling=1&aidCode=EUX",
+        "date": "2026-03-10 23:39:56"
+    },
+    {
+        "imei": "351478610253091",
+        "csc": "EUX",
+        "fw": "S937BXXU6CZC3.DM/S937BOXM6CZC3/S937BXXU6CZC3",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=c24f969599df4d4ba11d6ad6224b74d0&workId=4971421-WSA260310153959&pkgID=FW2026030552561313&crtDt=20260310153959&modemZeroBilling=1&aidCode=EUX",
+        "date": "2026-03-10 23:40:00"
+    }
+]

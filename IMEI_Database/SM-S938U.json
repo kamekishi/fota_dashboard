@@ -1,0 +1,65 @@
+[
+    {
+        "imei": "352512140059120",
+        "csc": "ATT",
+        "fw": "S938USQU7CZAH.DM/S938UOYN7CZAH/S938USQU7CZAH",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=d1aaa416f01e4e76ae6fadfef396418f&workId=2994978-WSA260211231102&pkgID=FW2026012951859844&crtDt=20260211231102&modemZeroBilling=1&aidCode=ATT",
+        "date": "2026-02-12 00:11:02"
+    },
+    {
+        "imei": "352512140059138",
+        "csc": "ATT",
+        "fw": "S938USQU7CZAH.DM/S938UOYN7CZAH/S938USQU7CZAH",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=db843c7da40049da8acd1e0b92207117&workId=8232076-WSA260211231103&pkgID=FW2026012951859844&crtDt=20260211231103&modemZeroBilling=1&aidCode=ATT",
+        "date": "2026-02-12 00:11:03"
+    },
+    {
+        "imei": "352512140059054",
+        "csc": "ATT",
+        "fw": "S938USQU7CZAH.DM/S938UOYN7CZAH/S938USQU7CZAH",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=db843c7da40049da8acd1e0b92207117&workId=8232076-WSA260211231103&pkgID=FW2026012951859844&crtDt=20260211231103&modemZeroBilling=1&aidCode=ATT",
+        "date": "2026-02-12 00:11:03"
+    },
+    {
+        "imei": "352512140059146",
+        "csc": "ATT",
+        "fw": "S938USQU7CZAH.DM/S938UOYN7CZAH/S938USQU7CZAH",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=db843c7da40049da8acd1e0b92207117&workId=8232076-WSA260211231103&pkgID=FW2026012951859844&crtDt=20260211231103&modemZeroBilling=1&aidCode=ATT",
+        "date": "2026-02-12 00:11:03"
+    },
+    {
+        "imei": "352512140059187",
+        "csc": "ATT",
+        "fw": "S938USQU7CZAH.DM/S938UOYN7CZAH/S938USQU7CZAH",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=db843c7da40049da8acd1e0b92207117&workId=8232076-WSA260211231103&pkgID=FW2026012951859844&crtDt=20260211231103&modemZeroBilling=1&aidCode=ATT",
+        "date": "2026-02-12 00:11:03"
+    },
+    {
+        "imei": "352512140059211",
+        "csc": "ATT",
+        "fw": "S938USQU7CZAH.DM/S938UOYN7CZAH/S938USQU7CZAH",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=db843c7da40049da8acd1e0b92207117&workId=8232076-WSA260211231103&pkgID=FW2026012951859844&crtDt=20260211231103&modemZeroBilling=1&aidCode=ATT",
+        "date": "2026-02-12 00:11:03"
+    },
+    {
+        "imei": "352512140059229",
+        "csc": "ATT",
+        "fw": "S938USQU8ZZC7/S938UOYN8ZZC7/S938USQU8CZC7",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=10cc3e0214d34bf39fe117e5ce4d2452&workId=5763672-WSA260310151948&pkgID=FW2026031052708552&crtDt=20260310151948&modemZeroBilling=1&aidCode=ATT",
+        "date": "2026-03-10 23:19:49"
+    },
+    {
+        "imei": "352512140059302",
+        "csc": "ATT",
+        "fw": "S938USQU8ZZC7/S938UOYN8ZZC7/S938USQU8CZC7",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=605a4378d169429abf52e7691faaac13&workId=6234218-WSA260310151952&pkgID=FW2026031052708552&crtDt=20260310151952&modemZeroBilling=1&aidCode=ATT",
+        "date": "2026-03-10 23:19:53"
+    },
+    {
+        "imei": "352512140059591",
+        "csc": "ATT",
+        "fw": "S938USQU8ZZC7/S938UOYN8ZZC7/S938USQU8CZC7",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=32ee891316024204b74dd0091f1b40d5&workId=9957699-WSA260310152007&pkgID=FW2026031052708552&crtDt=20260310152007&modemZeroBilling=1&aidCode=ATT",
+        "date": "2026-03-10 23:20:07"
+    }
+]

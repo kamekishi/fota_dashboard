@@ -1,0 +1,30 @@
+[
+    {
+        "imei": "352688830088320",
+        "csc": "EUX",
+        "fw": "S931BXXS8BZB1/S931BOXM8BZB1/S931BXXS8BZB1",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=97657856fd8547469fd08882ac6bb394&workId=8811675-WSA260211201338&pkgID=FW2026020652050813&crtDt=20260211201338&modemZeroBilling=1&aidCode=EUX",
+        "date": "2026-02-11 21:13:39"
+    },
+    {
+        "imei": "352688830088361",
+        "csc": "EUX",
+        "fw": "S931BXXS8BZB1/S931BOXM8BZB1/S931BXXS8BZB1",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=4f3c45e9b31b40a9bb373e53d61ad88a&workId=1679271-WSA260211220701&pkgID=FW2026020652050813&crtDt=20260211220701&modemZeroBilling=1&aidCode=EUX",
+        "date": "2026-02-11 23:07:01"
+    },
+    {
+        "imei": "352688830088932",
+        "csc": "EUX",
+        "fw": "S931BXXS8BZB1/S931BOXM8BZB1/S931BXXS8BZB1",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=a33ee59b2e7e40e2a58d10ed0055cd1b&workId=5341939-WSA260211222529&pkgID=FW2026020652050813&crtDt=20260211222529&modemZeroBilling=1&aidCode=EUX",
+        "date": "2026-02-11 23:25:29"
+    },
+    {
+        "imei": "352688830091696",
+        "csc": "EUX",
+        "fw": "S931BXXS8BZB1/S931BOXM8BZB1/S931BXXS8BZB1",
+        "url": "https://dms.ospserver.net/v1/device/magicsync/mdm/sc/dlserver/descripter?authId=65f6d977d6dc4e98a882ef148be22fa5&workId=6079231-WSA260211233633&pkgID=FW2026020652050813&crtDt=20260211233633&modemZeroBilling=1&aidCode=EUX",
+        "date": "2026-02-12 00:36:34"
+    }
+]
