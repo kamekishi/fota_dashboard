@@ -3454,36 +3454,65 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
 
 
 def render_device_vault_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
-    grouped = device_vault_rows()
-    if not grouped:
+    rows = device_vault_list_rows()
+    if not rows:
         st.info("No devices are available in the vault yet.")
         return
+    model_options = sorted({str(row["model"]) for row in rows})
+    selected_model = st.selectbox(
+        "Device Model",
+        [""] + model_options,
+        format_func=lambda value: "All devices" if not value else value,
+        key="device_vault_model_filter",
+    )
+    filtered_rows = [row for row in rows if not selected_model or str(row["model"]) == selected_model]
+    if not filtered_rows:
+        st.info("No devices match the selected model number.")
+        return
 
-    for model, rows in grouped.items():
-        with st.expander(f"{model} ({len(rows)})", expanded=False):
-            st.markdown(
-                """
-                <div class="history-grid-header vault-grid-header">
-                    <span>CSC</span>
-                    <span>Latest Decrypted Firmware</span>
-                    <span>Date Decrypted</span>
+    total_pages = max(1, ceil(len(filtered_rows) / 10))
+    page_cols = st.columns([1, 4], gap="medium")
+    with page_cols[0]:
+        page = st.number_input(
+            "Page",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            key=f"device_vault_page_{selected_model or 'all'}",
+        )
+    with page_cols[1]:
+        st.markdown(
+            f"<div class='history-page-note'>Showing page {page} of {total_pages} • 10 devices per page</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        """
+        <div class="history-grid-header vault-flat-grid">
+            <span>Model</span>
+            <span>CSC</span>
+            <span>Latest Decrypted Firmware</span>
+            <span>Date Decrypted</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    start = (page - 1) * 10
+    for row in filtered_rows[start : start + 10]:
+        st.markdown(
+            textwrap.dedent(
+                f"""
+                <div class="history-list-row vault-flat-row">
+                    <span>{html.escape(str(row['model']))}</span>
+                    <span>{html.escape(str(row['csc']))}</span>
+                    <span>{html.escape(str(row['latest']))}</span>
+                    <span>{html.escape(str(row['date']))}</span>
                 </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            for row in rows:
-                st.markdown(
-                    textwrap.dedent(
-                        f"""
-                        <div class="history-list-row vault-list-row">
-                            <span>{html.escape(str(row['csc']))}</span>
-                            <span>{html.escape(str(row['latest']))}</span>
-                            <span>{html.escape(str(row['date']))}</span>
-                        </div>
-                        """
-                    ).strip(),
-                    unsafe_allow_html=True,
-                )
+                """
+            ).strip(),
+            unsafe_allow_html=True,
+        )
 
 
 def guest_device_vault_rows(
@@ -4003,47 +4032,97 @@ def render_dashboard_launcher(tab_descriptions: dict[str, str]) -> None:
     st.markdown(
         """
         <style>
+        [data-testid="stMainBlockContainer"] div[data-testid="stVerticalBlock"]:has(> div[data-testid="element-container"] .dashboard-launcher-marker) {
+            padding: 1.3rem 1.2rem 1.15rem;
+            border-radius: 32px;
+            min-height: 100%;
+            position: relative;
+            overflow: hidden;
+            background:
+                radial-gradient(circle at top left, rgba(255,255,255,0.50), transparent 36%),
+                radial-gradient(circle at bottom right, rgba(120, 172, 255, 0.12), transparent 34%),
+                linear-gradient(180deg, rgba(255,255,255,0.44), rgba(255,255,255,0.16));
+            border: 1px solid rgba(255,255,255,0.40);
+            box-shadow:
+                0 22px 46px rgba(43, 64, 102, 0.14),
+                0 4px 14px rgba(255,255,255,0.10) inset,
+                0 1px 0 rgba(255,255,255,0.38) inset;
+            backdrop-filter: blur(28px) saturate(130%);
+            -webkit-backdrop-filter: blur(28px) saturate(130%);
+        }
+
         .dashboard-launcher-item {
-            margin-bottom: 1.15rem;
+            margin-bottom: 1.55rem;
         }
 
-        .dashboard-launcher-title {
-            text-align: center;
-            font-size: 1.2rem;
-            font-weight: 760;
-            letter-spacing: -0.02em;
-            color: var(--text-main);
-            margin: 0 0 0.7rem 0;
+        .dashboard-launcher-marker {
+            display: none;
         }
 
-        [data-testid="stMainBlockContainer"] .dashboard-launcher-buttons .stButton > button {
-            min-height: 118px !important;
-            height: 100% !important;
-            white-space: break-spaces !important;
+        .dashboard-launcher-button-wrap {
+            width: 100%;
+            max-width: 240px;
+            margin: 0 auto;
+        }
+
+        .dashboard-launcher-button-wrap .stButton {
+            width: 100% !important;
+            display: block !important;
+        }
+
+        .dashboard-launcher-spacer {
+            width: 100%;
+            min-height: 52px;
+            border-radius: 999px;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
+        [data-testid="stMainBlockContainer"] .dashboard-launcher-button-wrap .stButton > button {
+            width: 100% !important;
+            min-height: 52px !important;
+            white-space: normal !important;
             text-align: center !important;
             justify-content: center !important;
             align-items: center !important;
-            padding: 22px 24px !important;
-            line-height: 1.55 !important;
-            border-radius: 30px !important;
-            background: rgba(248, 251, 255, 0.62) !important;
-            color: var(--text-main) !important;
-            border: 1px solid rgba(255, 255, 255, 0.9) !important;
-            box-shadow: 0 16px 38px rgba(75, 102, 150, 0.12) !important;
+            padding: 0.2rem 1rem !important;
+            border-radius: 999px !important;
+            background: linear-gradient(135deg, #2d72ff, #63bbff) !important;
+            color: white !important;
+            border: 0 !important;
+            box-shadow: 0 12px 26px rgba(58, 117, 228, 0.22) !important;
         }
 
-        [data-testid="stMainBlockContainer"] .dashboard-launcher-buttons .stButton > button:hover {
-            background: rgba(255, 255, 255, 0.72) !important;
-            border-color: rgba(124, 168, 255, 0.58) !important;
+        [data-testid="stMainBlockContainer"] .dashboard-launcher-button-wrap .stButton > button:hover {
+            background: linear-gradient(135deg, #2467ef, #58b4ff) !important;
             transform: translateY(-1px);
         }
 
-        [data-testid="stMainBlockContainer"] .dashboard-launcher-buttons .stButton > button p {
-            white-space: break-spaces !important;
-            line-height: 1.55 !important;
-            font-size: 0.98rem !important;
+        [data-testid="stMainBlockContainer"] .dashboard-launcher-button-wrap .stButton > button p {
+            white-space: normal !important;
+            line-height: 1.15 !important;
+            font-size: 1rem !important;
             margin: 0 !important;
             text-align: center !important;
+            font-weight: 760 !important;
+            letter-spacing: -0.01em !important;
+        }
+
+        .dashboard-launcher-divider {
+            width: 100%;
+            height: 1px;
+            border-radius: 999px;
+            margin: 0.1rem 0 0.15rem;
+            background: linear-gradient(90deg, rgba(120, 144, 176, 0.04), rgba(120, 144, 176, 0.30), rgba(120, 144, 176, 0.04));
+        }
+
+        .dashboard-launcher-subtitle {
+            max-width: 42ch;
+            margin: 0.1rem auto 0;
+            color: var(--text-soft);
+            font-size: 0.98rem;
+            line-height: 1.55;
+            text-align: center;
         }
         </style>
         """,
@@ -4057,12 +4136,21 @@ def render_dashboard_launcher(tab_descriptions: dict[str, str]) -> None:
             name, desc = item
             with col:
                 st.markdown("<div class='dashboard-launcher-item'>", unsafe_allow_html=True)
-                st.markdown(f"<div class='dashboard-launcher-title'>{html.escape(name)}</div>", unsafe_allow_html=True)
-                st.markdown("<div class='dashboard-launcher-buttons'>", unsafe_allow_html=True)
-                if st.button(desc, key=f"dashboard_launch_{name}", use_container_width=True):
-                    st.session_state.requested_tab = name
-                    st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
+                with st.container():
+                    st.markdown("<div class='dashboard-launcher-marker'></div>", unsafe_allow_html=True)
+                    left_pad, center_button, right_pad = st.columns([1, 1, 1], gap="small")
+                    with left_pad:
+                        st.markdown("<div class='dashboard-launcher-spacer'></div>", unsafe_allow_html=True)
+                    with center_button:
+                        st.markdown("<div class='dashboard-launcher-button-wrap'>", unsafe_allow_html=True)
+                        if st.button(name, key=f"dashboard_launch_{name}"):
+                            st.session_state.requested_tab = name
+                            st.rerun()
+                        st.markdown("</div>", unsafe_allow_html=True)
+                    with right_pad:
+                        st.markdown("<div class='dashboard-launcher-spacer'></div>", unsafe_allow_html=True)
+                    st.markdown("<div class='dashboard-launcher-divider'></div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='dashboard-launcher-subtitle'>{html.escape(desc)}</div>", unsafe_allow_html=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -4681,6 +4769,11 @@ def inject_styles() -> None:
         .history-grid-header.vault-grid-header,
         .history-list-row.vault-list-row {
             grid-template-columns: 0.75fr 1.8fr 1.15fr;
+        }
+
+        .history-grid-header.vault-flat-grid,
+        .history-list-row.vault-flat-row {
+            grid-template-columns: 1.05fr 0.72fr 1.85fr 1.05fr;
         }
 
         .history-grid-header.decrypt-grid-header,
@@ -6297,6 +6390,72 @@ def device_vault_rows() -> dict[str, list[dict[str, str]]]:
     return _device_vault_rows_cached(path_signature(DECRYPTED_DB_PATH), path_signature(DB_PATH))
 
 
+@st.cache_data(show_spinner=False)
+def _device_vault_list_rows_cached(decrypt_signature: str, history_signature: str) -> list[dict[str, str]]:
+    rows_out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    if decrypt_signature != "missing":
+        decrypt_rows = with_decrypt_db(
+            """
+            SELECT fd.device_model, fd.csc, fd.firmware_found, fd.date_discovered
+            FROM firmware_decryptions fd
+            ORDER BY fd.device_model ASC, fd.csc ASC, fd.year_value DESC, fd.month_value DESC, fd.firmware_found DESC, datetime(fd.date_discovered) DESC, fd.id DESC
+            """
+        )
+        for row in decrypt_rows:
+            model = normalize_model_number(str(row["device_model"] or ""))
+            csc = normalize_csc_code(str(row["csc"] or ""))
+            if not model or not csc or (model, csc) in seen:
+                continue
+            seen.add((model, csc))
+            rows_out.append(
+                {
+                    "model": model,
+                    "csc": csc,
+                    "latest": str(row["firmware_found"] or "No decrypted firmware yet"),
+                    "date": str(row["date_discovered"] or "-"),
+                }
+            )
+
+    if history_signature != "missing":
+        history_rows = with_db(
+            """
+            SELECT device_model, csc, MAX(timestamp) AS timestamp
+            FROM firmware_hits
+            WHERE device_model IS NOT NULL AND device_model != ''
+            GROUP BY device_model, csc
+            ORDER BY device_model, csc
+            """
+        )
+        for row in history_rows:
+            model = normalize_model_number(str(row["device_model"] or ""))
+            csc = normalize_csc_code(str(row["csc"] or ""))
+            if not model or not csc or (model, csc) in seen:
+                continue
+            seen.add((model, csc))
+            rows_out.append(
+                {
+                    "model": model,
+                    "csc": csc,
+                    "latest": latest_firmware_for_model_csc(model, csc) or "No decrypted firmware yet",
+                    "date": str(row["timestamp"] or "-"),
+                }
+            )
+
+    return sorted(
+        rows_out,
+        key=lambda item: (
+            str(item["model"]).lower(),
+            str(item["csc"]).lower(),
+        ),
+    )
+
+
+def device_vault_list_rows() -> list[dict[str, str]]:
+    return _device_vault_list_rows_cached(path_signature(DECRYPTED_DB_PATH), path_signature(DB_PATH))
+
+
 def clear_data_caches() -> None:
     _load_device_catalog_cached.clear()
     _model_options_from_decrypt_db_cached.clear()
@@ -6304,6 +6463,7 @@ def clear_data_caches() -> None:
     _library_rows_for_model_cached.clear()
     _latest_cached_discoveries_cached.clear()
     _device_vault_rows_cached.clear()
+    _device_vault_list_rows_cached.clear()
     _imei_database_totals_cached.clear()
 
 
@@ -7011,7 +7171,10 @@ def main() -> None:
     elif active_tab == "Library":
         render_database_history_tab()
     elif active_tab == "Device Vault":
-        render_guest_device_vault_tab(catalog) if guest_mode else render_device_vault_tab(catalog)
+        if guest_mode:
+            render_guest_device_vault_tab(catalog)
+        else:
+            render_device_vault_tab(catalog)
     elif active_tab == "Night Patrol" and not guest_mode:
         render_night_patrol_tab()
     elif active_tab == "Pathfinder" and not guest_mode:
