@@ -436,7 +436,7 @@ def decrypt_firmware(
     ) as progress:
         task = progress.add_task("scan", total=outer_total, target=progress_label)
         if progress_callback:
-            progress_callback("decrypt", 0, outer_total, progress_label)
+            progress_callback("decrypt", 0, outer_total, f"{progress_label}|resolved=0")
         for flavor in "US":
             for bl in bls:
                 for upd in updates:
@@ -448,7 +448,7 @@ def decrypt_firmware(
                                 percent = int((completed / outer_total) * 100) if outer_total else 100
                                 if percent != last_reported_percent:
                                     last_reported_percent = percent
-                                    progress_callback("decrypt", completed, outer_total, progress_label)
+                                    progress_callback("decrypt", completed, outer_total, f"{progress_label}|resolved={len(decrypted)}")
                             local_cp = cp_versions[-16:].copy()
                             if third_code:
                                 for i in range(1, 4):
@@ -495,10 +495,10 @@ def decrypt_firmware(
 
                                 if not full_brute and len(decrypted) == len(md5_set):
                                     if progress_callback:
-                                        progress_callback("decrypt", outer_total, outer_total, progress_label)
+                                        progress_callback("decrypt", outer_total, outer_total, f"{progress_label}|resolved={len(decrypted)}")
                                     return decrypted
     if progress_callback:
-        progress_callback("decrypt", outer_total, outer_total, progress_label)
+        progress_callback("decrypt", outer_total, outer_total, f"{progress_label}|resolved={len(decrypted)}")
     return decrypted
 
 # ===============================

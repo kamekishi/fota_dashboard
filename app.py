@@ -16,6 +16,7 @@ from uuid import uuid4
 import xml.etree.ElementTree as ET
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 import dc3
 import ota
@@ -26,6 +27,7 @@ DEVICES_PATH = BASE_DIR / "devices.json"
 DB_PATH = BASE_DIR / "fumo_history.db"
 DECRYPTED_DB_PATH = BASE_DIR / "decrypted_firmware.db"
 IMEI_DB_DIR = BASE_DIR / "imei_database"
+ACTIVITY_DB_PATH = BASE_DIR / "activity.db"
 USER_AGENT = "SyncML DM Client"
 ADMIN_SECRET_CODE = "A7K9M2Q4X8P1L6N3R5T7V9Y2B4C6D8F1"
 MAX_ACTIVITY = 10
@@ -66,6 +68,7 @@ def init_state() -> None:
         "imei_live_state": None,
         "active_tab": "Dashboard",
         "activity_feed_visible": True,
+        "logout_refresh_pending": False,
         "is_authenticated": False,
         "user_mode": None,
         "login_error": None,
@@ -91,25 +94,210 @@ def init_state() -> None:
 
 
 def push_activity(level: str, message: str) -> None:
+    event = prepare_activity_event(level, message)
+    if not event:
+        return
+    write_activity_event(event["level"], event["tool"], event["message"])
     timestamp = datetime.now().strftime("%H:%M:%S")
-    item = {"time": timestamp, "level": level.upper(), "message": message}
-    st.session_state.activity_feed.insert(0, item)
-    del st.session_state.activity_feed[MAX_ACTIVITY:]
+    item = {"time": timestamp, "level": event["level"], "message": event["message"]}
+    try:
+        st.session_state.activity_feed.insert(0, item)
+        del st.session_state.activity_feed[MAX_ACTIVITY:]
+    except Exception:
+        pass
 
 
 def queue_activity(level: str, message: str) -> None:
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    with TASK_LOCK:
-        ACTIVITY_QUEUE.append({"time": timestamp, "level": level.upper(), "message": message})
+    event = prepare_activity_event(level, message)
+    if not event:
+        return
+    write_activity_event(event["level"], event["tool"], event["message"])
 
 
 def sync_activity_feed() -> None:
-    with TASK_LOCK:
-        items = list(ACTIVITY_QUEUE)
-        ACTIVITY_QUEUE.clear()
-    for item in items:
-        st.session_state.activity_feed.insert(0, item)
-    del st.session_state.activity_feed[MAX_ACTIVITY:]
+    st.session_state.activity_feed = recent_activity_events(MAX_ACTIVITY)
+
+
+def with_activity_db(query: str, params: tuple[Any, ...] = (), *, one: bool = False) -> Any:
+    with sqlite3.connect(ACTIVITY_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(query, params)
+        return cursor.fetchone() if one else cursor.fetchall()
+
+
+def execute_activity_db(query: str, params: tuple[Any, ...] = ()) -> None:
+    with sqlite3.connect(ACTIVITY_DB_PATH) as conn:
+        conn.execute(query, params)
+        conn.commit()
+
+
+def extract_model_and_csc(message: str) -> tuple[str, str]:
+    text = str(message or "")
+    match = re.search(r"(SM-[A-Z0-9-]+)\s*(?:[/|(]\s*([A-Z0-9]{2,4})\s*[)|])?", text, re.IGNORECASE)
+    if not match:
+        return "", ""
+    model = normalize_model_number(match.group(1))
+    csc = normalize_csc_code(match.group(2) or "")
+    return model, csc
+
+
+def prepare_activity_event(level: str, message: str) -> dict[str, str] | None:
+    raw = str(message or "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+
+    ignored_markers = [
+        "dashboard initialized",
+        "dashboard status checks refreshed",
+        "admin mode activated",
+        "guest mode activated",
+        "added device ",
+        "updated device ",
+        "removed device ",
+        " already uses imei ",
+        " to imei ",
+    ]
+    if any(marker in lowered for marker in ignored_markers):
+        return None
+
+    model, csc = extract_model_and_csc(raw)
+    normalized = raw
+    tool = "System"
+    event_level = str(level or "INFO").upper()
+
+    if lowered.startswith("a user is using decryption tool"):
+        tool = "Decryption"
+        normalized = raw
+    elif lowered.startswith("a user is fetching an ota"):
+        tool = "FOTA Scanner"
+        normalized = raw
+    elif lowered.startswith("a user is running imei scanner"):
+        tool = "IMEI Scanner"
+        normalized = raw
+    elif lowered.startswith("a new ota is found"):
+        tool = "FOTA Scanner"
+        normalized = raw
+        event_level = "HIT"
+    elif lowered.startswith("a user found a new imei"):
+        tool = "IMEI Scanner"
+        normalized = raw
+        event_level = "HIT"
+    elif lowered.startswith("a user found latest update using the decryption tool"):
+        tool = "Decryption"
+        normalized = raw
+        event_level = "HIT"
+    elif "running a live samsung lookup" in lowered or "cache miss for" in lowered or "reused cached link for" in lowered:
+        tool = "FOTA Scanner"
+        if model:
+            normalized = f"A user is fetching an OTA for {model}" + (f" ({csc})." if csc else ".")
+        else:
+            normalized = "A user is fetching an OTA."
+        event_level = "INFO"
+    elif lowered.startswith("fetched ") and " for " in lowered:
+        tool = "FOTA Scanner"
+        normalized = f"A new OTA is found for {model}! Check out the Library." if model else "A new OTA is found! Check out the Library."
+        event_level = "HIT"
+    elif "already on the newest package" in lowered:
+        tool = "FOTA Scanner"
+        normalized = f"A user checked OTA for {model} and no newer package was found." if model else "A user checked OTA and no newer package was found."
+    elif lowered.startswith("lookup failed for"):
+        tool = "FOTA Scanner"
+        normalized = f"A user encountered an OTA lookup error for {model}." if model else "A user encountered an OTA lookup error."
+        event_level = "ERROR"
+    elif "imei scanner started for" in lowered:
+        tool = "IMEI Scanner"
+        normalized = "A user is running IMEI Scanner."
+    elif "encountered auth maked failed during an imei scanner" in lowered:
+        tool = "IMEI Scanner"
+        normalized = raw
+        event_level = "ERROR"
+    elif lowered.startswith("imei scan completed for"):
+        tool = "IMEI Scanner"
+        hit_match = re.search(r"with\s+(\d+)\s+hits", lowered)
+        hit_count = int(hit_match.group(1)) if hit_match else 0
+        normalized = (
+            "A user found a new IMEI that hits an update! Check out IMEI Database!"
+            if hit_count > 0
+            else "A user completed IMEI Scanner."
+        )
+        event_level = "HIT" if hit_count > 0 else "INFO"
+    elif lowered.startswith("imei scan for") and "terminated due to" in lowered:
+        tool = "IMEI Scanner"
+        normalized = (
+            f"A user has encountered Auth Maked Failed during an IMEI Scanner for {model}."
+            if "auth" in lowered
+            else f"A user encountered an IMEI Scanner error for {model}."
+        )
+        event_level = "ERROR"
+    elif lowered.startswith("decryption ran by previous user for"):
+        tool = "Decryption"
+        normalized = raw
+        event_level = "HIT" if "new firmware is found" in lowered else "INFO"
+    elif lowered.startswith("decryption scan completed for") or lowered.startswith("pathfinder decrypted firmware for"):
+        tool = "Decryption"
+        normalized = "A user found latest update using the Decryption tool."
+        event_level = "HIT"
+    elif lowered.startswith("decryption failed for") or lowered.startswith("pathfinder decryption failed for"):
+        tool = "Decryption"
+        normalized = f"A decryption run failed for {model}" + (f" ({csc})." if csc else ".")
+        event_level = "ERROR"
+    elif lowered.startswith("imported ") and " from fumo history into " in lowered:
+        tool = "IMEI Database"
+        target = re.search(r"into\s+(SM-[A-Z0-9-]+)", raw, re.IGNORECASE)
+        normalized = f"A user refreshed IMEI Database from FUMO History for {normalize_model_number(target.group(1))}." if target else "A user refreshed IMEI Database from FUMO History."
+        event_level = "INFO"
+    elif lowered.startswith("night patrol failed for"):
+        tool = "Night Patrol"
+        normalized = f"A Night Patrol job failed for {model}" + (f" ({csc})." if csc else ".")
+        event_level = "ERROR"
+    elif lowered.startswith("new firmware decrypted for"):
+        tool = "Night Patrol"
+        normalized = f"A user found latest update using the Decryption tool for {model}." if model else "A user found latest update using the Decryption tool."
+        event_level = "HIT"
+    elif lowered.startswith("night patrol stopped for"):
+        tool = "Night Patrol"
+        normalized = f"A user stopped Night Patrol for {model}" + (f" ({csc})." if csc else ".")
+        event_level = "WARN"
+    else:
+        return None
+
+    return {"level": event_level, "tool": tool, "message": normalized}
+
+
+def write_activity_event(level: str, tool: str, message: str) -> None:
+    execute_activity_db(
+        """
+        INSERT INTO activity_events (created_at, level, tool_name, message)
+        VALUES (?, ?, ?, ?)
+        """,
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), str(level).upper(), tool, message),
+    )
+
+
+def recent_activity_events(limit: int = MAX_ACTIVITY) -> list[dict[str, str]]:
+    if not ACTIVITY_DB_PATH.exists():
+        return []
+    rows = with_activity_db(
+        """
+        SELECT created_at, level, message
+        FROM activity_events
+        ORDER BY datetime(created_at) DESC, id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    items: list[dict[str, str]] = []
+    for row in rows:
+        created_at = str(row["created_at"] or "")
+        items.append(
+            {
+                "time": created_at[11:19] if len(created_at) >= 19 else created_at,
+                "level": str(row["level"] or "INFO").upper(),
+                "message": str(row["message"] or ""),
+            }
+        )
+    return items
 
 
 def path_signature(path: Path) -> str:
@@ -988,7 +1176,7 @@ def render_decryption_firmware_table(model: str, csc: str, highlight_version: st
     )
     start = (page - 1) * 10
     for row in rows[start : start + 10]:
-        row_class = "history-list-row highlighted" if str(row["firmware_found"]) == highlight_version else "history-list-row"
+        row_class = "history-list-row decrypt-grid-row highlighted" if str(row["firmware_found"]) == highlight_version else "history-list-row decrypt-grid-row"
         st.markdown(
             textwrap.dedent(
                 f"""
@@ -1064,7 +1252,7 @@ def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
                 st.session_state.decrypt_results = [result]
                 st.session_state.decrypt_error = None
                 st.session_state.decrypt_latest_key = f"{effective_model}|{effective_csc}|{result.get('latest_found', '')}"
-                push_activity("info", f"Decryption scan completed for {effective_model} / {effective_csc}.")
+                push_activity("info", decryption_completion_message(effective_model, effective_csc, result))
             except Exception as exc:
                 st.session_state.decrypt_results = []
                 st.session_state.decrypt_error = str(exc)
@@ -1114,7 +1302,7 @@ def render_database_history_tab() -> None:
 
     st.markdown(
         """
-        <div class="history-grid-header">
+        <div class="history-grid-header library-grid">
             <span>Time</span>
             <span>Model</span>
             <span>CSC</span>
@@ -1392,7 +1580,7 @@ def show_delta_scan_dialog() -> None:
             for col, label in zip(header, ["Firmware base", "Firmware Update Found", "Security Patch Date", "Action"]):
                 col.markdown(f"<div class='imei-db-header'>{html.escape(label)}</div>", unsafe_allow_html=True)
             for idx, row in enumerate(rows):
-                cols = st.columns([1.5, 1.5, 1.1, 0.85], gap="small")
+                cols = st.columns([1.45, 1.65, 1.05, 0.85], gap="small")
                 cols[0].markdown(
                     f"<div class='imei-db-cell'>{html.escape(str(row['request_base_version'] or '-'))}</div>",
                     unsafe_allow_html=True,
@@ -1553,8 +1741,8 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
     with left:
         start_imei = st.text_input("Start IMEI", value=db_imei, key="scan_imei")
     with right:
-        step = st.number_input("IMEI Step", min_value=1, max_value=999, value=4, step=1, key="scan_step")
-    attempts = st.number_input("Attempts", min_value=1, max_value=50, value=50, step=1, key="scan_attempts")
+        step = st.number_input("Thread [Recommended: 4]", min_value=1, max_value=999, value=4, step=1, key="scan_step")
+    attempts = st.number_input("No. of IMEI", min_value=1, max_value=50, value=50, step=1, key="scan_attempts")
 
     if st.button("Start IMEI Scan", key="start_imei_scan_v2", use_container_width=True):
         if not model or not csc or not base or not start_imei:
@@ -1584,7 +1772,7 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         for col, label in zip(header_cols, headers):
             col.markdown(f"<div class='imei-db-header'>{html.escape(label)}</div>", unsafe_allow_html=True)
         for idx, row in enumerate(rows):
-            cols = st.columns([0.7, 1.2, 1.25, 0.9, 1.35, 0.95], gap="small")
+            cols = st.columns([0.7, 1.2, 1.2, 0.9, 1.45, 1.0], gap="small")
             cols[0].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['attempt']))}</div>", unsafe_allow_html=True)
             cols[1].markdown(f"<div class='imei-db-cell'>{html.escape(mask_imei(str(row['imei'])))}</div>", unsafe_allow_html=True)
             cols[2].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['status']))}</div>", unsafe_allow_html=True)
@@ -1658,11 +1846,11 @@ def render_night_patrol_tab() -> None:
     rows = patrol_job_rows()
     if rows:
         st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
-        header = st.columns([1.05, 0.65, 0.75, 1.0, 1.2, 0.8], gap="small")
+        header = st.columns([1.05, 0.65, 0.78, 1.05, 1.35, 0.85], gap="small")
         for col, label in zip(header, ["Model", "CSC", "Interval", "Next Run", "Status", "Action"]):
             col.markdown(f"<div class='imei-db-header'>{html.escape(label)}</div>", unsafe_allow_html=True)
         for row in rows:
-            cols = st.columns([1.05, 0.65, 0.75, 1.0, 1.2, 0.8], gap="small")
+            cols = st.columns([1.05, 0.65, 0.78, 1.05, 1.35, 0.85], gap="small")
             cols[0].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['device_model']))}</div>", unsafe_allow_html=True)
             cols[1].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['csc']))}</div>", unsafe_allow_html=True)
             cols[2].markdown(f"<div class='imei-db-cell'>{int(row['interval_seconds']) // 60} min</div>", unsafe_allow_html=True)
@@ -1729,6 +1917,7 @@ def render_pathfinder_tab() -> None:
                     if not csc:
                         st.error("CSC is required before running decryption.")
                     else:
+                        push_activity("info", "A user is using Decryption tool. Performance might get impacted.")
                         status_box = st.status("Starting decryption...", expanded=True)
                         progress = st.progress(0)
 
@@ -1749,7 +1938,7 @@ def render_pathfinder_tab() -> None:
                             st.session_state.decrypt_results = [result]
                             st.session_state.decrypt_error = None
                             st.session_state.decrypt_latest_key = f"{model}|{csc}|{result.get('latest_found', '')}"
-                            push_activity("info", f"Pathfinder decrypted firmware for {model} / {csc}.")
+                            push_activity("info", decryption_completion_message(model, csc, result))
                             st.rerun()
                         except Exception as exc:
                             progress.progress(100)
@@ -1761,7 +1950,7 @@ def render_pathfinder_tab() -> None:
             for col, label in zip(header, ["Triplet", "Security Patch", "Release Type", "Build Type"]):
                 col.markdown(f"<div class='imei-db-header'>{html.escape(label)}</div>", unsafe_allow_html=True)
             for row in rows:
-                cols = st.columns(4, gap="small")
+                cols = st.columns([2.2, 1.05, 1.0, 0.95], gap="small")
                 cols[0].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['firmware_found']))}</div>", unsafe_allow_html=True)
                 cols[1].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['security_patch_date'] or 'Unknown'))}</div>", unsafe_allow_html=True)
                 cols[2].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['release_type'] or 'Unknown'))}</div>", unsafe_allow_html=True)
@@ -2253,7 +2442,66 @@ def logout_to_login() -> None:
     st.session_state.delta_scan_result = None
     st.session_state.delta_scan_error = None
     st.session_state.fota_scanned_imei = ""
+    st.session_state.logout_refresh_pending = True
     st.rerun()
+
+
+def decryption_completion_message(model: str, csc: str, result: dict[str, Any]) -> str:
+    clean_model = normalize_model_number(model)
+    clean_csc = normalize_csc_code(csc)
+    previous_latest = str(result.get("previous_latest", "") or "").strip()
+    latest_found = str(result.get("latest_found", "") or "").strip()
+    has_new_firmware = bool(
+        latest_found
+        and (
+            not previous_latest
+            or firmware_sort_key(latest_found) > firmware_sort_key(previous_latest)
+        )
+    )
+    outcome = (
+        "New firmware is found! Check out Decryption tab."
+        if has_new_firmware
+        else "No new firmware is found."
+    )
+    return f"Decryption ran by previous user for {clean_model} ({clean_csc}) is completed. {outcome}"
+
+
+def parse_decryption_progress_label(label: str) -> tuple[str, int]:
+    raw = str(label or "").strip()
+    resolved = 0
+    display = raw
+    marker = "|resolved="
+    if marker in raw:
+        display, tail = raw.split(marker, 1)
+        match = re.search(r"\d+", tail)
+        if match:
+            resolved = int(match.group(0))
+    return display.strip(), max(resolved, 0)
+
+
+def update_decryption_progress_ui(
+    stage: str,
+    completed: int,
+    total: int,
+    label: str,
+    *,
+    status_box: Any,
+    progress_bar: Any,
+    subtitle_box: Any | None = None,
+) -> None:
+    ratio = min(max(completed / max(total, 1), 0.0), 1.0)
+    stage_map = {
+        "prepare": "Preparing server MD5 list",
+        "decrypt": "Decrypting firmware map",
+        "finalize": "Finalizing database records",
+    }
+    display_label, resolved = parse_decryption_progress_label(label)
+    status_box.write(f"{stage_map.get(stage, stage.title())}: `{display_label}`")
+    progress_bar.progress(int(ratio * 100))
+    if subtitle_box is not None:
+        decoded = max(int(completed or 0), 0) if stage == "decrypt" else 0
+        unresolved = max(decoded - resolved, 0)
+        subtitle_box.caption(f"Decoding: {decoded} | Resolved: {resolved} | Unresolved: {unresolved}")
 
 
 def latest_firmware_lookup() -> tuple[dict[tuple[str, str, str], str], dict[tuple[str, str], str]]:
@@ -2988,8 +3236,8 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
     with left:
         start_imei = st.text_input("Start IMEI", key="imei_v3_start_imei")
     with right:
-        step = st.number_input("IMEI Step", min_value=1, max_value=999, value=4, step=1, key="imei_v3_step")
-    attempts = st.number_input("Attempts", min_value=1, max_value=50, value=50, step=1, key="imei_v3_attempts")
+        step = st.number_input("Thread [Recommended: 4]", min_value=1, max_value=999, value=4, step=1, key="imei_v3_step")
+    attempts = st.number_input("No. of IMEI", min_value=1, max_value=50, value=50, step=1, key="imei_v3_attempts")
 
     if st.button("Start IMEI Scan", key="start_imei_scan_v3", use_container_width=True):
         if not model or not csc or not base or not start_imei:
@@ -3283,18 +3531,22 @@ def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         if not effective_model or not effective_csc:
             st.error("Model and CSC are required.")
         else:
+            push_activity("info", "A user is using Decryption tool. Performance might get impacted.")
             status_box = st.status("Starting decryption...", expanded=True)
             progress = st.progress(0)
+            progress_subtitle = st.empty()
+            progress_subtitle.caption("Decoding: 0 | Resolved: 0 | Unresolved: 0")
 
             def progress_callback(stage: str, completed: int, total: int, label: str) -> None:
-                ratio = min(max(completed / max(total, 1), 0.0), 1.0)
-                stage_map = {
-                    "prepare": "Preparing server MD5 list",
-                    "decrypt": "Decrypting firmware map",
-                    "finalize": "Finalizing database records",
-                }
-                status_box.write(f"{stage_map.get(stage, stage.title())}: `{label}`")
-                progress.progress(int(ratio * 100))
+                update_decryption_progress_ui(
+                    stage,
+                    completed,
+                    total,
+                    label,
+                    status_box=status_box,
+                    progress_bar=progress,
+                    subtitle_box=progress_subtitle,
+                )
 
             try:
                 result = decrypt_device_live(effective_model, effective_csc, persist=True, progress_callback=progress_callback)
@@ -3472,10 +3724,10 @@ def render_imei_database_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         st.info("No IMEIs are stored for this model yet.")
         return
 
-    header_cols = st.columns([1.4, 0.75, 1.5, 0.9, 0.95], gap="small")
-    headers = ["IMEI", "CSC", "Firmware Hit", "Amount of Hit", "Action"]
-    for col, label in zip(header_cols, headers):
-        col.markdown(f"<div class='imei-db-header'>{html.escape(label)}</div>", unsafe_allow_html=True)
+        header_cols = st.columns([1.4, 0.75, 1.5, 0.9, 0.95], gap="small")
+        headers = ["IMEI", "CSC", "Firmware Hit", "Amount of Hit", "Action"]
+        for col, label in zip(header_cols, headers):
+            col.markdown(f"<div class='imei-db-header'>{html.escape(label)}</div>", unsafe_allow_html=True)
 
     fallback_csc_options = csc_options_for_model(effective_model)
     default_csc = normalize_csc_code(
@@ -3484,7 +3736,7 @@ def render_imei_database_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         else (fallback_csc_options[0] if fallback_csc_options else "")
     )
     for idx, row in enumerate(rows):
-        row_cols = st.columns([1.4, 0.75, 1.5, 0.9, 0.95], gap="small")
+        row_cols = st.columns([1.45, 0.72, 1.55, 0.88, 0.95], gap="small")
         values = [mask_imei(str(row["imei"])), str(row["csc"]), short_version(str(row["firmware_hit"] or "")) or "-", int(row["hit_count"] or 0)]
         for col, value in zip(row_cols[:-1], values):
             col.markdown(f"<div class='imei-db-cell'>{html.escape(str(value))}</div>", unsafe_allow_html=True)
@@ -3547,7 +3799,7 @@ def render_database_history_tab() -> None:
     for row in page_rows:
         row_html = textwrap.dedent(
             f"""
-            <div class="history-list-row">
+            <div class="history-list-row library-grid">
                 <span>{html.escape(str(row["timestamp"]))}</span>
                 <span>{html.escape(str(row["device_model"]))}</span>
                 <span>{html.escape(str(row["csc"]))}</span>
@@ -3556,7 +3808,7 @@ def render_database_history_tab() -> None:
             </div>
             """
         )
-        row_cols = st.columns([1, 0.085], gap="small")
+        row_cols = st.columns([12, 1.8], gap="small")
         with row_cols[0]:
             st.markdown(row_html, unsafe_allow_html=True)
         with row_cols[1]:
@@ -3616,8 +3868,8 @@ def render_login_page() -> None:
         """
         <div class="login-shell">
             <section class="glass-card login-card">
-                <div class="login-title">KinZoKu Access</div>
-                <div class="login-subtitle">Enter the secret code for Admin Mode, or continue as a guest with the limited surface.</div>
+                <div class="login-title">Project Killshot Authentication</div>
+                <div class="login-subtitle">Enter the secret code for Admin Mode, or continue as a guest.</div>
             </section>
         </div>
         """,
@@ -4055,10 +4307,26 @@ def inject_styles() -> None:
         .history-list-row span {
             color: var(--text-main);
             font-size: 0.92rem;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            white-space: normal;
+            line-height: 1.35;
             text-align: center;
+        }
+
+        .history-grid-header.library-grid,
+        .history-list-row.library-grid {
+            grid-template-columns: 1.35fr 1.05fr 0.7fr 1.2fr 1.2fr;
+        }
+
+        .history-grid-header.vault-grid-header,
+        .history-list-row.vault-list-row {
+            grid-template-columns: 0.75fr 1.8fr 1.15fr;
+        }
+
+        .history-grid-header.decrypt-grid-header,
+        .history-list-row.decrypt-grid-row {
+            grid-template-columns: 2.15fr 1.05fr 1fr 0.95fr;
         }
 
         .imei-db-header {
@@ -4640,6 +4908,10 @@ def show_imei_scan_dialog() -> None:
                 state["paused_for_auth"] = True
                 state["auth_error_label"] = format_imei_status_text(response.get("status", "auth_failed"))
                 state["auth_error_raw"] = str(response.get("status", "auth_failed"))
+                push_activity(
+                    "error",
+                    f"A user has encountered Auth Maked Failed during an IMEI Scanner for {state['model']}.",
+                )
                 st.session_state.imei_live_state = state
                 break
 
@@ -4924,6 +5196,22 @@ def ensure_workspace_databases() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_device_cscs_model_updated
             ON device_cscs (model, updated_at DESC);
+            """
+        )
+        conn.commit()
+    with sqlite3.connect(ACTIVITY_DB_PATH) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS activity_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                level TEXT NOT NULL,
+                tool_name TEXT,
+                message TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_activity_events_created
+            ON activity_events (created_at DESC, id DESC);
             """
         )
         conn.commit()
@@ -5226,10 +5514,28 @@ def latest_firmware_for_model_csc(model: str, csc: str) -> str:
     return str(history["found_pda"] or "") if history else ""
 
 
-def upsert_decrypted_firmware_rows(model: str, csc: str, items: list[dict[str, Any]]) -> tuple[str, str]:
+def existing_decrypted_versions(model: str, csc: str) -> set[str]:
+    rows = with_decrypt_db(
+        """
+        SELECT firmware_found
+        FROM firmware_decryptions
+        WHERE device_model = ? AND csc = ?
+        """,
+        (normalize_model_number(model), normalize_csc_code(csc)),
+    )
+    return {str(row["firmware_found"] or "").strip() for row in rows if str(row["firmware_found"] or "").strip()}
+
+
+def upsert_decrypted_firmware_rows(model: str, csc: str, items: list[dict[str, Any]]) -> tuple[str, str, str]:
     clean_model = normalize_model_number(model)
     clean_csc = normalize_csc_code(csc)
     before_latest = latest_firmware_for_model_csc(clean_model, clean_csc)
+    existing_versions = existing_decrypted_versions(clean_model, clean_csc)
+    new_versions = [
+        str(item.get("version", "")).strip()
+        for item in items
+        if str(item.get("version", "")).strip() and str(item.get("version", "")).strip() not in existing_versions
+    ]
     discovered_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for item in items:
         version = str(item.get("version", "")).strip()
@@ -5265,7 +5571,8 @@ def upsert_decrypted_firmware_rows(model: str, csc: str, items: list[dict[str, A
         )
     after_latest = latest_firmware_for_model_csc(clean_model, clean_csc)
     ensure_known_device(clean_model, clean_csc, base=after_latest or before_latest)
-    return before_latest, after_latest
+    latest_new = max(new_versions, key=firmware_sort_key) if new_versions else ""
+    return before_latest, after_latest, latest_new
 
 
 def decrypt_device_live(
@@ -5303,8 +5610,9 @@ def decrypt_device_live(
 
     previous_latest = latest_firmware_for_model_csc(clean_model, clean_csc)
     current_latest = previous_latest
+    latest_new = ""
     if persist and items:
-        _, current_latest = upsert_decrypted_firmware_rows(clean_model, clean_csc, items)
+        _, current_latest, latest_new = upsert_decrypted_firmware_rows(clean_model, clean_csc, items)
 
     return {
         "model": clean_model,
@@ -5317,7 +5625,8 @@ def decrypt_device_live(
         "unresolved_count": max(0, len(server_md5s) - len(items)),
         "items": items,
         "previous_latest": previous_latest,
-        "latest_found": current_latest or (items[0].get("version", "") if items else ""),
+        "recorded_latest": current_latest or (items[0].get("version", "") if items else ""),
+        "latest_found": latest_new,
     }
 
 
@@ -6008,18 +6317,63 @@ def refresh_snapshot(log_message: bool) -> None:
     st.session_state.snapshot_time = datetime.now()
     if log_message:
         push_activity("sync", "Dashboard status checks refreshed.")
+
+
+def render_layout_bridge() -> None:
+    components.html(
+        """
+        <script>
+        const doc = window.parent.document;
+        const root = doc.documentElement;
+
+        function updateDockLayout() {
+          const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+          let sidebarWidth = 0;
+          if (sidebar) {
+            const rect = sidebar.getBoundingClientRect();
+            if (rect.width > 40 && rect.right > 0) {
+              sidebarWidth = rect.width;
+            }
+          }
+          const viewportWidth = window.parent.innerWidth || doc.documentElement.clientWidth || 1280;
+          const contentMax = 1440;
+          const gutter = 72;
+          const contentWidth = Math.min(contentMax, Math.max(360, viewportWidth - sidebarWidth - gutter));
+          const contentLeft = Math.max(16, sidebarWidth + ((viewportWidth - sidebarWidth - contentWidth) / 2));
+          root.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
+          root.style.setProperty('--content-width', `${contentWidth}px`);
+          root.style.setProperty('--content-left', `${contentLeft}px`);
+        }
+
+        updateDockLayout();
+        const bodyObserver = new MutationObserver(updateDockLayout);
+        bodyObserver.observe(doc.body, { childList: true, subtree: true, attributes: true });
+        if (window.parent.ResizeObserver) {
+          const resizeObserver = new window.parent.ResizeObserver(updateDockLayout);
+          resizeObserver.observe(doc.body);
+          const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+          if (sidebar) resizeObserver.observe(sidebar);
+        }
+        window.parent.addEventListener('resize', updateDockLayout);
+        </script>
+        """,
+        height=0,
+    )
+
+
 def render_activity_feed() -> None:
-    if not st.session_state.activity_feed_visible:
+    if is_guest_mode() or not st.session_state.activity_feed_visible:
         return
 
-    items = st.session_state.activity_feed or [{"time": "--:--:--", "level": "INFO", "message": "Dashboard is ready."}]
-    guest_mode = is_guest_mode()
+    items = recent_activity_events(2)
+    if not items:
+        return
     items_html = "".join(
         f"""
         <div class="activity-item">
             <span class="activity-time">{html.escape(item['time'])}</span>
             <span class="pill {level_badge(item['level'])}">{html.escape(item['level'])}</span>
-            <span class="activity-message">{html.escape(redact_guest_text(item['message']) if guest_mode else item['message'])}</span>
+            <span class="activity-message">{html.escape(item['message'])}</span>
         </div>
         """
         for item in items[:2]
@@ -6054,13 +6408,23 @@ def main() -> None:
 
     if not st.session_state.get("is_authenticated"):
         render_login_page()
+        if st.session_state.get("logout_refresh_pending"):
+            st.session_state.logout_refresh_pending = False
+            components.html(
+                """
+                <script>
+                const target = window.parent || window;
+                target.location.reload();
+                </script>
+                """,
+                height=0,
+            )
         return
 
     surface_new_notifications()
 
     if st.session_state.snapshot_time is None:
         refresh_snapshot(log_message=False)
-        push_activity("info", "Dashboard initialized with cache-first lookup mode.")
 
     catalog = load_device_catalog()
     guest_mode = is_guest_mode()
@@ -6126,10 +6490,11 @@ def main() -> None:
             key="active_tab",
         )
         st.markdown("<div class='left-pane-footer'></div>", unsafe_allow_html=True)
-        activity_label = "Hide Activity Feed" if st.session_state.activity_feed_visible else "Show Activity Feed"
-        if st.button(activity_label, key="left_pane_activity_toggle", use_container_width=True):
-            st.session_state.activity_feed_visible = not st.session_state.activity_feed_visible
-            st.rerun()
+        if not guest_mode:
+            activity_label = "Hide Activity Feed" if st.session_state.activity_feed_visible else "Show Activity Feed"
+            if st.button(activity_label, key="left_pane_activity_toggle", use_container_width=True):
+                st.session_state.activity_feed_visible = not st.session_state.activity_feed_visible
+                st.rerun()
         if st.button("Logout", key="left_pane_logout", use_container_width=True):
             logout_to_login()
 
@@ -6191,6 +6556,7 @@ def main() -> None:
     if st.session_state.dialog_payload:
         show_download_dialog(st.session_state.dialog_payload)
 
+    render_layout_bridge()
     render_activity_feed()
 
 
