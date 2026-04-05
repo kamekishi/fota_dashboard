@@ -1549,7 +1549,7 @@ def show_firmware_picker_dialog() -> None:
     if not versions:
         st.info("No decrypted firmware versions were produced.")
     else:
-        display_full_triplet = prefix == "fota_v3"
+        display_full_triplet = prefix in {"fota_v3", "imei_v3"}
         choice = st.radio(
             "Latest 10 firmwares",
             versions,
@@ -3133,8 +3133,8 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: boo
     effective_db_imei = scanned_imei or db_imei
 
     st.caption(
-        "Use a saved model from decrypted_firmware.db or type the values manually. "
-        "Any new model number you enter will be recorded for future use."
+        "Select the Device model and CSC that you would like to use to fetch OTA delta updates. "
+        "Please Note that any input you manually enter will be recorded."
     )
 
     scan_mode = st.radio(
@@ -3172,7 +3172,7 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: boo
             imei = effective_db_imei
             st.text_input("IMEI", value="Locked in Guest Mode", disabled=True, key="fota_v3_guest_imei_auto")
             if effective_db_imei:
-                st.caption(f"Using stored IMEI ending in {effective_db_imei[-4:]}.")
+                st.caption(f"Using whatever the IMEI stored in the database.")
             else:
                 st.caption("Guest Mode requires a stored IMEI for this model and CSC.")
     else:
@@ -3322,12 +3322,18 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         base = st.selectbox(
             "Base Firmware",
             [""] + available_bases,
-            format_func=lambda value: "Select a firmware base" if not value else short_version(value),
+            format_func=lambda value: "Select a firmware base" if not value else value,
             key="imei_v3_base_db",
         )
     else:
         current_value = str(st.session_state.get("imei_v3_base", db_base) or "")
-        st.text_input("Base Firmware", value=current_value, disabled=True, key="imei_v3_base_picker_display")
+        st.text_input(
+            "Base Firmware",
+            value=current_value,
+            placeholder=current_value if current_value else "Select firmware via decryptor",
+            disabled=True,
+            key="imei_v3_base_picker_display",
+        )
         if st.button("Use decryptor", key="imei_v3_open_decryptor", use_container_width=True):
             if not model or not csc:
                 st.error("Model number and CSC are required before using the decryptor.")
@@ -3335,11 +3341,33 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
                 ensure_known_device(model, csc)
                 st.session_state.firmware_picker_request = {"prefix": "imei_v3", "model": model, "csc": csc}
                 st.rerun()
+        if current_value:
+            st.caption(f"Selected firmware: {current_value}")
         base = current_value
+
+    imei_options = known_imei_options(model, csc) if model and csc else []
+    current_start_imei = str(st.session_state.get("imei_v3_start_imei", "") or "")
+    if current_start_imei and current_start_imei not in imei_options:
+        imei_options = [current_start_imei] + imei_options
+    elif db_imei and db_imei not in imei_options:
+        imei_options = [db_imei] + imei_options
 
     left, right = st.columns(2, gap="medium")
     with left:
-        start_imei = st.text_input("Start IMEI", key="imei_v3_start_imei")
+        if imei_options:
+            selected_start_imei = current_start_imei or db_imei or imei_options[0]
+            if selected_start_imei not in imei_options:
+                selected_start_imei = imei_options[0]
+            start_imei = st.selectbox(
+                "Start IMEI",
+                imei_options,
+                index=imei_options.index(selected_start_imei),
+                format_func=lambda value: f"{value} ({mask_imei(value)})",
+                key="imei_v3_start_imei_select",
+            )
+            st.session_state.imei_v3_start_imei = start_imei
+        else:
+            start_imei = st.text_input("Start IMEI", key="imei_v3_start_imei")
     with right:
         step = st.number_input("Thread [Recommended: 4]", min_value=1, max_value=999, value=4, step=1, key="imei_v3_step")
     attempts = st.number_input("No. of IMEI", min_value=1, max_value=50, value=50, step=1, key="imei_v3_attempts")
@@ -3421,7 +3449,7 @@ def render_device_vault_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
                         f"""
                         <div class="history-list-row vault-list-row">
                             <span>{html.escape(str(row['csc']))}</span>
-                            <span>{html.escape(short_triplet_version(row['latest']))}</span>
+                            <span>{html.escape(str(row['latest']))}</span>
                             <span>{html.escape(str(row['date']))}</span>
                         </div>
                         """
@@ -3487,22 +3515,7 @@ def guest_device_vault_rows(
 
 
 def render_guest_device_vault_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
-    grouped_rows = guest_device_vault_rows(catalog)
-    for category, rows in grouped_rows.items():
-        with st.expander(f"{category} ({len(rows)})", expanded=False):
-            for row in rows:
-                st.markdown(
-                    f"""
-                    <section class="glass-card vault-device-card guest-vault-card">
-                        <div class="vault-device-name">{html.escape(row['name'])}</div>
-                        <div class="vault-device-line"><strong>Device Model</strong> {html.escape(row['model'])}</div>
-                        <div class="vault-device-line"><strong>Recorded CSCs</strong> {html.escape(row['cscs'])}</div>
-                        <div class="vault-device-line"><strong>Firmware Base</strong> {html.escape(row['base'])}</div>
-                        <div class="vault-device-line"><strong>Latest Found Firmware</strong> {html.escape(row['latest'])}</div>
-                    </section>
-                    """,
-                    unsafe_allow_html=True,
-                )
+    render_device_vault_tab(catalog)
 
 
 def firmware_version_sort_key(version: str | None) -> tuple[int, int, str]:
@@ -3660,7 +3673,7 @@ def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
                 st.session_state.decrypt_results = [result]
                 st.session_state.decrypt_error = None
                 st.session_state.decrypt_latest_key = f"{effective_model}|{effective_csc}|{result.get('latest_found', '')}"
-                push_activity("info", f"Decryption scan completed for {effective_model} / {effective_csc}.")
+                push_activity("info", decryption_completion_message(effective_model, effective_csc, result))
             except Exception as exc:
                 st.session_state.decrypt_results = []
                 st.session_state.decrypt_error = str(exc)
@@ -3677,9 +3690,20 @@ def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
 
     if effective_model:
         highlight_version = ""
+        highlight_versions: set[str] = set()
         if results:
             highlight_version = str(results[0].get("latest_found", "") or "")
-        render_decryption_firmware_table(effective_model, effective_csc, highlight_version=highlight_version)
+            highlight_versions = {
+                str(version or "").strip()
+                for version in results[0].get("new_versions", [])
+                if str(version or "").strip()
+            }
+        render_decryption_firmware_table(
+            effective_model,
+            effective_csc,
+            highlight_version=highlight_version,
+            highlight_versions=highlight_versions,
+        )
 
 
 def render_imei_scan_results(rows: list[dict[str, Any]], category: str, device_index: int) -> None:
@@ -4044,7 +4068,7 @@ def inject_styles() -> None:
         }
 
         [data-testid="stToolbar"] {
-            display: none !important;
+            background: transparent !important;
         }
 
         [data-testid="stDecoration"] {
@@ -4082,6 +4106,118 @@ def inject_styles() -> None:
             justify-content: space-between;
             gap: 24px;
             margin-bottom: 1rem;
+        }
+
+        body:has(div[role="dialog"]) [data-testid="stAppViewContainer"] > .main,
+        body:has(div[role="dialog"]) [data-testid="stSidebar"] {
+            filter: blur(10px) saturate(0.92);
+            transition: filter 180ms ease;
+        }
+
+        div[data-testid="stDialog"] > div,
+        div[role="dialog"] > div {
+            background: rgba(248, 251, 255, 0.56) !important;
+            border: 1px solid rgba(255, 255, 255, 0.82) !important;
+            box-shadow: 0 22px 60px rgba(76, 102, 146, 0.22) !important;
+            backdrop-filter: blur(34px) saturate(140%) !important;
+            -webkit-backdrop-filter: blur(34px) saturate(140%) !important;
+            border-radius: 32px !important;
+            overflow: hidden !important;
+        }
+
+        div[data-testid="stDialog"]::before,
+        div[role="dialog"]::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            border-radius: 32px;
+            pointer-events: none;
+            background:
+                radial-gradient(circle at top left, rgba(102, 179, 255, 0.13), transparent 34%),
+                radial-gradient(circle at bottom right, rgba(45, 114, 255, 0.10), transparent 30%);
+        }
+
+        div[data-testid="stDialog"] section[tabindex="-1"],
+        div[role="dialog"] section[tabindex="-1"] {
+            background: transparent !important;
+            padding: 0 !important;
+        }
+
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"],
+        div[role="dialog"] [data-testid="stDialogHeader"],
+        div[data-testid="stDialog"] header,
+        div[role="dialog"] header {
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+            margin: 0 !important;
+            padding: 22px 24px 6px 24px !important;
+        }
+
+        div[data-testid="stDialog"] [data-testid="stDialogContent"],
+        div[role="dialog"] [data-testid="stDialogContent"] {
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+            margin: 0 !important;
+            padding: 6px 24px 24px 24px !important;
+        }
+
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"] + div,
+        div[role="dialog"] header + div {
+            margin-top: 0 !important;
+            border-top: 0 !important;
+        }
+
+        div[data-testid="stDialog"] button[kind="header"],
+        div[role="dialog"] button[kind="header"] {
+            background: rgba(255, 255, 255, 0.28) !important;
+            border-radius: 999px !important;
+            border: 1px solid rgba(255, 255, 255, 0.58) !important;
+        }
+
+        div[data-testid="stDialog"] .glass-card,
+        div[role="dialog"] .glass-card,
+        div[data-testid="stDialog"] .table-card,
+        div[role="dialog"] .table-card,
+        div[data-testid="stDialog"] .result-card,
+        div[role="dialog"] .result-card,
+        div[data-testid="stDialog"] .decrypt-highlight-card,
+        div[role="dialog"] .decrypt-highlight-card {
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            border-radius: 0 !important;
+        }
+
+        div[data-testid="stDialog"] .stAlert,
+        div[role="dialog"] .stAlert,
+        div[data-testid="stDialog"] .stCodeBlock,
+        div[role="dialog"] .stCodeBlock,
+        div[data-testid="stDialog"] pre,
+        div[role="dialog"] pre,
+        div[data-testid="stDialog"] .stTextArea textarea,
+        div[role="dialog"] .stTextArea textarea,
+        div[data-testid="stDialog"] .stTextInput input,
+        div[role="dialog"] .stTextInput input,
+        div[data-testid="stDialog"] .stSelectbox div[data-baseweb="select"] > div,
+        div[role="dialog"] .stSelectbox div[data-baseweb="select"] > div {
+            background: rgba(255, 255, 255, 0.22) !important;
+            border: 1px solid rgba(255, 255, 255, 0.42) !important;
+            box-shadow: none !important;
+            backdrop-filter: blur(10px) !important;
+            -webkit-backdrop-filter: blur(10px) !important;
+        }
+
+        div[data-testid="stDialog"] .stButton > button,
+        div[role="dialog"] .stButton > button,
+        div[data-testid="stDialog"] .stLinkButton a,
+        div[role="dialog"] .stLinkButton a {
+            box-shadow: none !important;
         }
 
         .header-title {
@@ -6715,7 +6851,7 @@ def main() -> None:
         f"""
         <div class="oneui-header">
             <div>
-                <div class="header-title">Project Killshot Dashboard</div>
+                <div class="header-title">{html.escape(active_tab)}</div>
                 <div class="header-subtitle">{html.escape(tab_descriptions[active_tab])}</div>
             </div>
             <div class="header-chip">User Mode: {mode_label}</div>
