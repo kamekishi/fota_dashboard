@@ -36,6 +36,7 @@ TASKS: dict[str, dict[str, Any]] = {}
 ACTIVITY_QUEUE: list[dict[str, str]] = []
 PATROL_LOCK = threading.Lock()
 PATROL_THREADS: dict[str, threading.Thread] = {}
+PATROL_COORDINATOR_KEY = "__night_patrol__"
 
 
 st.set_page_config(
@@ -1122,7 +1123,12 @@ def render_decryption_results_card(result: dict[str, Any]) -> None:
     st.markdown("<div class='section-spacer-sm'></div>", unsafe_allow_html=True)
 
 
-def render_decryption_firmware_table(model: str, csc: str, highlight_version: str = "") -> None:
+def render_decryption_firmware_table(
+    model: str,
+    csc: str,
+    highlight_version: str = "",
+    highlight_versions: set[str] | None = None,
+) -> None:
     rows = with_decrypt_db(
         """
         SELECT firmware_found, security_patch_date, release_type, build_type, date_discovered
@@ -1175,8 +1181,12 @@ def render_decryption_firmware_table(model: str, csc: str, highlight_version: st
         unsafe_allow_html=True,
     )
     start = (page - 1) * 10
+    highlight_set = {str(highlight_version or "").strip()} if highlight_version else set()
+    if highlight_versions:
+        highlight_set.update({str(version or "").strip() for version in highlight_versions if str(version or "").strip()})
     for row in rows[start : start + 10]:
-        row_class = "history-list-row decrypt-grid-row highlighted" if str(row["firmware_found"]) == highlight_version else "history-list-row decrypt-grid-row"
+        version = str(row["firmware_found"] or "").strip()
+        row_class = "history-list-row decrypt-grid-row highlighted" if version in highlight_set else "history-list-row decrypt-grid-row"
         st.markdown(
             textwrap.dedent(
                 f"""
@@ -1234,16 +1244,19 @@ def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         else:
             status_box = st.status("Starting decryption...", expanded=True)
             progress = st.progress(0)
+            progress_subtitle = st.empty()
+            progress_subtitle.caption("0.0%")
 
             def progress_callback(stage: str, completed: int, total: int, label: str) -> None:
-                ratio = min(max(completed / max(total, 1), 0.0), 1.0)
-                stage_map = {
-                    "prepare": "Preparing server MD5 list",
-                    "decrypt": "Decrypting firmware map",
-                    "finalize": "Finalizing database records",
-                }
-                status_box.write(f"{stage_map.get(stage, stage.title())}: `{label}`")
-                progress.progress(int(ratio * 100))
+                update_decryption_progress_ui(
+                    stage,
+                    completed,
+                    total,
+                    label,
+                    status_box=status_box,
+                    progress_bar=progress,
+                    subtitle_box=progress_subtitle,
+                )
 
             try:
                 result = decrypt_device_live(effective_model, effective_csc, persist=True, progress_callback=progress_callback)
@@ -1269,9 +1282,20 @@ def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
 
     if effective_model:
         highlight_version = ""
+        highlight_versions: set[str] = set()
         if results:
             highlight_version = str(results[0].get("latest_found", "") or "")
-        render_decryption_firmware_table(effective_model, effective_csc, highlight_version=highlight_version)
+            highlight_versions = {
+                str(version or "").strip()
+                for version in results[0].get("new_versions", [])
+                if str(version or "").strip()
+            }
+        render_decryption_firmware_table(
+            effective_model,
+            effective_csc,
+            highlight_version=highlight_version,
+            highlight_versions=highlight_versions,
+        )
 
 
 def render_database_history_tab() -> None:
@@ -1494,11 +1518,19 @@ def show_firmware_picker_dialog() -> None:
     if not request.get("versions"):
         status_box = st.status("Decrypting latest firmware list...", expanded=True)
         progress = st.progress(0)
+        progress_subtitle = st.empty()
+        progress_subtitle.caption("0.0%")
 
         def progress_callback(stage: str, completed: int, total: int, label: str) -> None:
-            ratio = min(max(completed / max(total, 1), 0.0), 1.0)
-            progress.progress(int(ratio * 100))
-            status_box.write(f"{stage.title()}: `{label}`")
+            update_decryption_progress_ui(
+                stage,
+                completed,
+                total,
+                label,
+                status_box=status_box,
+                progress_bar=progress,
+                subtitle_box=progress_subtitle,
+            )
 
         try:
             result = decrypt_device_live(model, csc, persist=True, progress_callback=progress_callback)
@@ -1517,10 +1549,11 @@ def show_firmware_picker_dialog() -> None:
     if not versions:
         st.info("No decrypted firmware versions were produced.")
     else:
+        display_full_triplet = prefix == "fota_v3"
         choice = st.radio(
             "Latest 10 firmwares",
             versions,
-            format_func=lambda value: short_version(value),
+            format_func=(lambda value: value) if display_full_triplet else (lambda value: short_version(value)),
             key=f"{prefix}_firmware_picker_choice",
         )
         if st.button("Use Selected Firmware", key=f"{prefix}_use_picker_version", use_container_width=True):
@@ -1611,36 +1644,41 @@ def scanner_device_input(prefix: str) -> tuple[str, str, str, str]:
     csc = ""
     imei = ""
     base = ""
-    if mode:
-        left, right = st.columns(2, gap="medium")
-        with left:
-            selected_model = st.selectbox(
-                "Device Model",
-                [""] + model_options,
-                format_func=lambda value: "Select a model" if not value else value,
-                key=f"{prefix}_selected_model",
-            )
-            manual_model = st.text_input("Or type Model Number", key=f"{prefix}_manual_model")
-            model = normalize_model_number(manual_model or selected_model)
-        with right:
-            csc_options = csc_options_for_model(model)
-            selected_csc = st.selectbox(
-                "CSC",
-                [""] + csc_options,
-                format_func=lambda value: "Select a CSC" if not value else value,
-                key=f"{prefix}_selected_csc",
-            )
-            manual_csc = st.text_input("Or type CSC", key=f"{prefix}_manual_csc")
-            csc = normalize_csc_code(manual_csc or selected_csc)
+    left, right = st.columns(2, gap="medium")
+    with left:
+        selected_model = st.selectbox(
+            "Device Model (Database)",
+            [""] + model_options,
+            format_func=lambda value: "Select a model" if not value else value,
+            key=f"{prefix}_selected_model",
+            disabled=not mode,
+        )
+        manual_model = st.text_input(
+            "Device Model (Manual)",
+            key=f"{prefix}_manual_model",
+            disabled=mode,
+        )
+    resolved_model = normalize_model_number(selected_model if mode else manual_model)
+    with right:
+        csc_options = csc_options_for_model(resolved_model)
+        selected_csc = st.selectbox(
+            "CSC (Database)",
+            [""] + csc_options,
+            format_func=lambda value: "Select a CSC" if not value else value,
+            key=f"{prefix}_selected_csc",
+            disabled=not mode,
+        )
+        manual_csc = st.text_input(
+            "CSC (Manual)",
+            key=f"{prefix}_manual_csc",
+            disabled=mode,
+        )
+    model = resolved_model
+    csc = normalize_csc_code(selected_csc if mode else manual_csc)
+    if model:
         context = best_device_context(model, csc)
         imei = context.get("imei", "")
         base = context.get("base", "")
-    else:
-        left, right = st.columns(2, gap="medium")
-        with left:
-            model = normalize_model_number(st.text_input("Device Model", key=f"{prefix}_manual_model_only"))
-        with right:
-            csc = normalize_csc_code(st.text_input("CSC", key=f"{prefix}_manual_csc_only"))
     return model, csc, imei, base
 
 
@@ -1794,16 +1832,25 @@ def render_night_patrol_tab() -> None:
         """
         <section class="glass-card table-card">
             <div class="section-kicker">Night Patrol</div>
-            <div class="progress-caption">Select up to three model / CSC pairs for repeating background decryption cycles.</div>
+            <div class="progress-caption">Select up to three model / CSC pairs for repeating background decryption cycles, one device at a time, with one shared interval between completed cycles.</div>
         </section>
         """,
         unsafe_allow_html=True,
     )
     entries: list[dict[str, Any]] = []
     model_options = model_options_from_decrypt_db()
+    interval_minutes = st.number_input(
+        "Cycle Interval (min)",
+        min_value=5,
+        max_value=1440,
+        value=60,
+        step=5,
+        key="patrol_cycle_interval",
+    )
+    st.markdown("<div class='section-spacer-sm'></div>", unsafe_allow_html=True)
     for idx in range(3):
         st.markdown(f"**Slot {idx + 1}**")
-        cols = st.columns([1.2, 1.0, 0.8], gap="medium")
+        cols = st.columns([1.35, 1.05], gap="medium")
         with cols[0]:
             selected_model = st.selectbox(
                 "Known Model",
@@ -1822,8 +1869,6 @@ def render_night_patrol_tab() -> None:
             )
             manual_csc = st.text_input("Or type CSC", key=f"patrol_manual_csc_{idx}")
             csc = normalize_csc_code(manual_csc or selected_csc)
-        with cols[2]:
-            interval_minutes = st.number_input("Interval (min)", min_value=5, max_value=1440, value=60, step=5, key=f"patrol_interval_{idx}")
         if model and csc:
             entries.append(
                 {
@@ -1920,16 +1965,19 @@ def render_pathfinder_tab() -> None:
                         push_activity("info", "A user is using Decryption tool. Performance might get impacted.")
                         status_box = st.status("Starting decryption...", expanded=True)
                         progress = st.progress(0)
+                        progress_subtitle = st.empty()
+                        progress_subtitle.caption("0.0%")
 
                         def progress_callback(stage: str, completed: int, total: int, label: str) -> None:
-                            ratio = min(max(completed / max(total, 1), 0.0), 1.0)
-                            stage_map = {
-                                "prepare": "Preparing server MD5 list",
-                                "decrypt": "Decrypting firmware map",
-                                "finalize": "Finalizing database records",
-                            }
-                            status_box.write(f"{stage_map.get(stage, stage.title())}: `{label}`")
-                            progress.progress(int(ratio * 100))
+                            update_decryption_progress_ui(
+                                stage,
+                                completed,
+                                total,
+                                label,
+                                status_box=status_box,
+                                progress_bar=progress,
+                                subtitle_box=progress_subtitle,
+                            )
 
                         try:
                             result = decrypt_device_live(model, csc, persist=True, progress_callback=progress_callback)
@@ -2495,13 +2543,11 @@ def update_decryption_progress_ui(
         "decrypt": "Decrypting firmware map",
         "finalize": "Finalizing database records",
     }
-    display_label, resolved = parse_decryption_progress_label(label)
-    status_box.write(f"{stage_map.get(stage, stage.title())}: `{display_label}`")
+    display_label, _ = parse_decryption_progress_label(label)
+    status_box.update(label=f"{stage_map.get(stage, stage.title())}: {display_label}", expanded=True)
     progress_bar.progress(int(ratio * 100))
     if subtitle_box is not None:
-        decoded = max(int(completed or 0), 0) if stage == "decrypt" else 0
-        unresolved = max(decoded - resolved, 0)
-        subtitle_box.caption(f"Decoding: {decoded} | Resolved: {resolved} | Unresolved: {unresolved}")
+        subtitle_box.caption(f"{ratio * 100:.1f}%")
 
 
 def latest_firmware_lookup() -> tuple[dict[tuple[str, str, str], str], dict[tuple[str, str], str]]:
@@ -3082,6 +3128,7 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: boo
     if st.session_state.get("fota_v3_context_key") != context_key:
         st.session_state.fota_v3_context_key = context_key
         st.session_state.fota_scanned_imei = ""
+        st.session_state.fota_v3_base = ""
     scanned_imei = str(st.session_state.get("fota_scanned_imei", "") or "")
     effective_db_imei = scanned_imei or db_imei
 
@@ -3090,78 +3137,136 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: boo
         "Any new model number you enter will be recorded for future use."
     )
 
-    base_source = st.radio(
-        "Base Firmware Source",
-        ["Manual", "Decrypted Database", "Use decryptor"],
+    scan_mode = st.radio(
+        "Scan Mode",
+        ["Auto", "Manual"],
         horizontal=True,
-        key="fota_v3_base_source",
+        key="fota_v3_scan_mode",
     )
-    available_bases = latest_decrypted_versions(model, csc, limit=10) if model and csc else []
-    if base_source == "Manual":
-        base = st.text_input("Base Firmware", value=db_base, key="fota_v3_base_manual")
-    elif base_source == "Decrypted Database":
-        base = st.selectbox(
-            "Base Firmware",
-            [""] + available_bases,
-            format_func=lambda value: "Select a firmware base" if not value else short_version(value),
-            key="fota_v3_base_db",
-        )
-    else:
-        current_value = str(st.session_state.get("fota_v3_base", db_base) or "")
-        st.text_input("Base Firmware", value=current_value, disabled=True, key="fota_v3_base_picker_display")
-        if st.button("Use decryptor", key="fota_v3_open_decryptor", use_container_width=True):
-            if not model or not csc:
-                st.error("Model number and CSC are required before using the decryptor.")
-            else:
-                ensure_known_device(model, csc)
-                st.session_state.firmware_picker_request = {"prefix": "fota_v3", "model": model, "csc": csc}
-                st.rerun()
-        base = current_value
 
-    if guest_mode:
-        imei = effective_db_imei
-        st.text_input("IMEI", value="Locked in Guest Mode", disabled=True, key="fota_v3_guest_imei")
-        if effective_db_imei:
-            st.caption(f"Using stored IMEI ending in {effective_db_imei[-4:]}.")
-        else:
-            st.caption("Guest Mode requires a stored IMEI for this model and CSC.")
-    else:
-        imei_source = st.radio(
-            "IMEI Source",
-            ["Database", "Manual", "Scan for IMEI"],
-            horizontal=True,
-            key="fota_v3_imei_source",
+    available_bases = latest_decrypted_versions(model, csc, limit=10) if model and csc else []
+    base_options: list[str] = []
+    for value in [db_base, *available_bases]:
+        clean_value = str(value or "").strip()
+        if clean_value and clean_value not in base_options:
+            base_options.append(clean_value)
+    imei_options = known_imei_options(model, csc) if model and csc else []
+
+    if scan_mode == "Auto":
+        base = st.selectbox(
+            "Base Firmware Source",
+            [""] + base_options,
+            format_func=lambda value: "Select firmware from database" if not value else value,
+            key="fota_v3_base_auto",
         )
-        if imei_source == "Database":
-            imei = st.text_input("IMEI", value=effective_db_imei, key="fota_v3_imei_db")
-            st.caption("Database mode uses the most recently known IMEI from decrypted_firmware.db or fumo_history.db.")
-        elif imei_source == "Manual":
-            imei = st.text_input("IMEI", value=effective_db_imei, key="fota_v3_imei_manual")
+        if not guest_mode:
+            imei = st.selectbox(
+                "IMEI Source",
+                [""] + imei_options,
+                format_func=lambda value: "Select IMEI from database" if not value else mask_imei(value),
+                key="fota_v3_imei_auto",
+            )
+            if imei:
+                st.caption("Auto mode uses IMEIs saved from the app databases.")
         else:
-            imei = st.text_input("IMEI", value=scanned_imei or effective_db_imei, key="fota_v3_imei_scanned")
-            if st.button("Scan for IMEI", key="fota_v3_scan_for_imei", use_container_width=True):
-                if not model or not csc or not base:
-                    st.error("Model number, CSC, and firmware base are required before scanning for IMEI.")
+            imei = effective_db_imei
+            st.text_input("IMEI", value="Locked in Guest Mode", disabled=True, key="fota_v3_guest_imei_auto")
+            if effective_db_imei:
+                st.caption(f"Using stored IMEI ending in {effective_db_imei[-4:]}.")
+            else:
+                st.caption("Guest Mode requires a stored IMEI for this model and CSC.")
+    else:
+        base_source = st.radio(
+            "Base Firmware Source",
+            ["Manual", "Decrypted Database", "Use decryptor"],
+            horizontal=True,
+            key="fota_v3_base_source",
+        )
+        if base_source == "Manual":
+            base = st.text_input("Base Firmware", value=db_base, key="fota_v3_base_manual")
+        elif base_source == "Decrypted Database":
+            base = st.selectbox(
+                "Base Firmware",
+                [""] + base_options,
+                format_func=lambda value: "Select a firmware base" if not value else value,
+                key="fota_v3_base_db",
+            )
+        else:
+            current_value = str(st.session_state.get("fota_v3_base", db_base) or "")
+            st.text_input(
+                "Base Firmware",
+                value=current_value,
+                placeholder=current_value if current_value else "Select firmware via decryptor",
+                disabled=True,
+                key="fota_v3_base_picker_display",
+            )
+            if st.button("Use decryptor", key="fota_v3_open_decryptor", use_container_width=True):
+                if not model or not csc:
+                    st.error("Model number and CSC are required before using the decryptor.")
                 else:
-                    ensure_known_device(model, csc, imei=effective_db_imei, base=base)
-                    st.session_state.imei_scan_results = []
-                    st.session_state.imei_last_hit = None
-                    st.session_state.imei_live_request = {
-                        "model": model,
-                        "csc": csc,
-                        "start_imei": effective_db_imei or imei,
-                        "base": base,
-                        "attempts": 50,
-                        "step": 4,
-                        "consumer": "fota_scanner",
-                        "database_imei": effective_db_imei,
-                    }
-                    st.session_state.imei_live_result = None
-                    st.session_state.imei_live_error = None
-                    st.session_state.imei_live_state = None
+                    ensure_known_device(model, csc)
+                    st.session_state.firmware_picker_request = {"prefix": "fota_v3", "model": model, "csc": csc}
                     st.rerun()
-            if scanned_imei:
-                st.caption(f"Using scanned IMEI ending in {scanned_imei[-4:]}.")
+            if current_value:
+                st.caption(f"Selected firmware: {current_value}")
+            base = current_value
+
+        if guest_mode:
+            imei = effective_db_imei
+            st.text_input("IMEI", value="Locked in Guest Mode", disabled=True, key="fota_v3_guest_imei")
+            if effective_db_imei:
+                st.caption(f"Using stored IMEI ending in {effective_db_imei[-4:]}.")
+            else:
+                st.caption("Guest Mode requires a stored IMEI for this model and CSC.")
+        else:
+            imei_source = st.radio(
+                "IMEI Source",
+                ["Database", "Manual", "Scan for IMEI"],
+                horizontal=True,
+                key="fota_v3_imei_source",
+            )
+            if imei_source == "Database":
+                imei = st.selectbox(
+                    "IMEI",
+                    [""] + imei_options,
+                    format_func=lambda value: "Select IMEI from database" if not value else mask_imei(value),
+                    key="fota_v3_imei_db",
+                )
+                st.caption("Database mode uses known IMEIs from decrypted_firmware.db, IMEI Database, or fumo_history.db.")
+            elif imei_source == "Manual":
+                imei = st.text_input("IMEI", value=effective_db_imei, key="fota_v3_imei_manual")
+            else:
+                current_imei = scanned_imei or effective_db_imei
+                st.text_input(
+                    "IMEI",
+                    value=current_imei,
+                    placeholder=mask_imei(current_imei) if current_imei else "Select IMEI via scanner",
+                    disabled=True,
+                    key="fota_v3_imei_scanned",
+                )
+                if st.button("Scan for IMEI", key="fota_v3_scan_for_imei", use_container_width=True):
+                    if not model or not csc or not base:
+                        st.error("Model number, CSC, and firmware base are required before scanning for IMEI.")
+                    else:
+                        ensure_known_device(model, csc, imei=effective_db_imei, base=base)
+                        st.session_state.imei_scan_results = []
+                        st.session_state.imei_last_hit = None
+                        st.session_state.imei_live_request = {
+                            "model": model,
+                            "csc": csc,
+                            "start_imei": effective_db_imei or current_imei,
+                            "base": base,
+                            "attempts": 50,
+                            "step": 4,
+                            "consumer": "fota_scanner",
+                            "database_imei": effective_db_imei,
+                        }
+                        st.session_state.imei_live_result = None
+                        st.session_state.imei_live_error = None
+                        st.session_state.imei_live_state = None
+                        st.rerun()
+                if current_imei:
+                    st.caption(f"Selected IMEI: {mask_imei(current_imei)}")
 
     if st.button("Fetch Download Link", key="fota_v3_fetch_live", use_container_width=True):
         if not model or not csc or not imei:
@@ -3535,7 +3640,7 @@ def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
             status_box = st.status("Starting decryption...", expanded=True)
             progress = st.progress(0)
             progress_subtitle = st.empty()
-            progress_subtitle.caption("Decoding: 0 | Resolved: 0 | Unresolved: 0")
+            progress_subtitle.caption("0.0%")
 
             def progress_callback(stage: str, completed: int, total: int, label: str) -> None:
                 update_decryption_progress_ui(
@@ -3936,6 +4041,28 @@ def inject_styles() -> None:
 
         [data-testid="stHeader"] {
             background: transparent;
+        }
+
+        [data-testid="stToolbar"] {
+            display: none !important;
+        }
+
+        [data-testid="stDecoration"] {
+            display: none !important;
+        }
+
+        #MainMenu {
+            display: none !important;
+        }
+
+        a[title="GitHub"],
+        a[title*="Fork" i],
+        a[title*="fork" i],
+        button[title*="Fork" i],
+        button[title*="fork" i] {
+            display: none !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
         }
 
         .oneui-header {
@@ -5585,6 +5712,7 @@ def decrypt_device_live(
     clean_model = normalize_model_number(model)
     clean_csc = normalize_csc_code(csc)
     ensure_known_device(clean_model, clean_csc)
+    existing_versions_before = existing_decrypted_versions(clean_model, clean_csc)
     server_md5s = dc3.get_md5_list(clean_model, clean_csc)
     if not server_md5s:
         raise RuntimeError("No firmware list was returned for this device and CSC.")
@@ -5607,6 +5735,12 @@ def decrypt_device_live(
         ),
         reverse=True,
     )
+    new_versions = [
+        str(item.get("version", "")).strip()
+        for item in items
+        if str(item.get("version", "")).strip()
+        and str(item.get("version", "")).strip() not in existing_versions_before
+    ]
 
     previous_latest = latest_firmware_for_model_csc(clean_model, clean_csc)
     current_latest = previous_latest
@@ -5624,6 +5758,7 @@ def decrypt_device_live(
         "resolved_count": len(items),
         "unresolved_count": max(0, len(server_md5s) - len(items)),
         "items": items,
+        "new_versions": sorted(new_versions, key=firmware_sort_key, reverse=True),
         "previous_latest": previous_latest,
         "recorded_latest": current_latest or (items[0].get("version", "") if items else ""),
         "latest_found": latest_new,
@@ -5731,6 +5866,65 @@ def best_device_context(model: str, csc: str | None = None) -> dict[str, str]:
     if not payload["base"] and payload["csc"]:
         payload["base"] = latest_firmware_for_model_csc(clean_model, payload["csc"])
     return payload
+
+
+@st.cache_data(show_spinner=False)
+def _known_imei_options_cached(model: str, csc: str, history_signature: str, imei_signature: str) -> list[str]:
+    clean_model = normalize_model_number(model)
+    clean_csc = normalize_csc_code(csc)
+    if not clean_model:
+        return []
+
+    options: list[str] = []
+    seen: set[str] = set()
+
+    def add_option(value: str) -> None:
+        clean_value = str(value or "").strip()
+        if not clean_value or clean_value in seen:
+            return
+        seen.add(clean_value)
+        options.append(clean_value)
+
+    context = best_device_context(clean_model, clean_csc)
+    add_option(str(context.get("imei", "") or ""))
+
+    if imei_signature not in {"missing", "empty"}:
+        path = imei_db_path_for_model(clean_model)
+        if path.exists():
+            query = "SELECT imei, csc FROM imei_hits"
+            params: tuple[Any, ...] = ()
+            if clean_csc:
+                query += " WHERE csc = ?"
+                params = (clean_csc,)
+            query += " ORDER BY hit_count DESC, datetime(last_seen) DESC, imei"
+            for row in with_model_imei_db(clean_model, query, params):
+                add_option(str(row["imei"] or ""))
+
+    if history_signature != "missing":
+        for row in with_db(
+            """
+            SELECT imei
+            FROM firmware_hits
+            WHERE device_model = ?
+              AND imei IS NOT NULL
+              AND imei != ''
+              AND (? = '' OR csc = ?)
+            ORDER BY datetime(timestamp) DESC, id DESC
+            """,
+            (clean_model, clean_csc, clean_csc),
+        ):
+            add_option(str(row["imei"] or ""))
+
+    return options
+
+
+def known_imei_options(model: str, csc: str) -> list[str]:
+    return _known_imei_options_cached(
+        model,
+        csc,
+        path_signature(DB_PATH),
+        imei_database_signature(),
+    )
 
 
 def update_device_imei_by_model_csc(model: str, csc: str, new_imei: str, source_label: str) -> bool:
@@ -6081,34 +6275,72 @@ def stop_patrol_job(job_id: str) -> bool:
         ("Stopped", "Patrol stopped manually.", now, job_id),
     )
     with PATROL_LOCK:
-        PATROL_THREADS.pop(job_id, None)
+        if not with_decrypt_db("SELECT job_id FROM patrol_jobs WHERE enabled = 1 LIMIT 1", one=True):
+            PATROL_THREADS.pop(PATROL_COORDINATOR_KEY, None)
     push_activity("warn", f"Night Patrol stopped for {row['device_model']} / {row['csc']}.")
     return True
 
 
-def patrol_worker(job_id: str) -> None:
+def enabled_patrol_rows() -> list[sqlite3.Row]:
+    return with_decrypt_db(
+        """
+        SELECT job_id, device_model, csc, interval_seconds, enabled, last_run, next_run, status, last_message
+        FROM patrol_jobs
+        WHERE enabled = 1
+        ORDER BY datetime(updated_at) ASC, device_model, csc
+        """
+    )
+
+
+def patrol_pause_with_stop(seconds: int) -> bool:
+    end_at = time.time() + max(int(seconds), 0)
+    while time.time() < end_at:
+        if not with_decrypt_db("SELECT job_id FROM patrol_jobs WHERE enabled = 1 LIMIT 1", one=True):
+            return False
+        time.sleep(1)
+    return True
+
+
+def patrol_worker() -> None:
     while True:
-        row = with_decrypt_db("SELECT * FROM patrol_jobs WHERE job_id = ?", (job_id,), one=True)
-        if row is None or int(row["enabled"] or 0) != 1:
+        rows = enabled_patrol_rows()
+        if not rows:
             break
 
         now = datetime.now()
-        next_run = str(row["next_run"] or "")
-        should_run = True
-        if next_run:
+        next_candidates: list[datetime] = []
+        for row in rows:
+            next_run = str(row["next_run"] or "")
             try:
-                should_run = datetime.strptime(next_run, "%Y-%m-%d %H:%M:%S") <= now
+                next_candidates.append(datetime.strptime(next_run, "%Y-%m-%d %H:%M:%S") if next_run else now)
             except ValueError:
-                should_run = True
+                next_candidates.append(now)
+        due_at = min(next_candidates) if next_candidates else now
+        if due_at > now:
+            time.sleep(min(2, max((due_at - now).total_seconds(), 0)))
+            continue
 
-        if should_run:
-            model = str(row["device_model"])
-            csc = str(row["csc"])
+        cycle_interval = int(rows[0]["interval_seconds"] or 3600)
+        cycle_started = datetime.now()
+        for index, row in enumerate(enabled_patrol_rows()):
+            current = with_decrypt_db("SELECT * FROM patrol_jobs WHERE job_id = ?", (str(row["job_id"]),), one=True)
+            if current is None or int(current["enabled"] or 0) != 1:
+                continue
+            model = str(current["device_model"])
+            csc = str(current["csc"])
+            running_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            execute_decrypt_db(
+                """
+                UPDATE patrol_jobs
+                SET status = ?, last_message = ?, updated_at = ?
+                WHERE job_id = ?
+                """,
+                ("Running", f"Decrypting {model} / {csc}...", running_at, str(current["job_id"])),
+            )
             try:
                 before = latest_firmware_for_model_csc(model, csc)
                 result = decrypt_device_live(model, csc, persist=True)
-                after = result.get("latest_found", "")
-                next_at = datetime.fromtimestamp(time.time() + int(row["interval_seconds"])).strftime("%Y-%m-%d %H:%M:%S")
+                after = str(result.get("latest_found", "") or "")
                 message = f"Patrol completed for {model} / {csc}"
                 if after and after != before and firmware_sort_key(after) > firmware_sort_key(before):
                     notice = f"New firmware decrypted for {model} | {csc}: {after}"
@@ -6120,51 +6352,73 @@ def patrol_worker(job_id: str) -> None:
                 execute_decrypt_db(
                     """
                     UPDATE patrol_jobs
-                    SET last_run = ?, next_run = ?, status = ?, last_message = ?, updated_at = ?
+                    SET last_run = ?, status = ?, last_message = ?, updated_at = ?
                     WHERE job_id = ?
                     """,
                     (
-                        now.strftime("%Y-%m-%d %H:%M:%S"),
-                        next_at,
-                        "Idle",
+                        running_at,
+                        "Completed",
                         message,
-                        now.strftime("%Y-%m-%d %H:%M:%S"),
-                        job_id,
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        str(current["job_id"]),
                     ),
                 )
             except Exception as exc:
-                next_at = datetime.fromtimestamp(time.time() + int(row["interval_seconds"])).strftime("%Y-%m-%d %H:%M:%S")
                 execute_decrypt_db(
                     """
                     UPDATE patrol_jobs
-                    SET last_run = ?, next_run = ?, status = ?, last_message = ?, updated_at = ?
+                    SET last_run = ?, status = ?, last_message = ?, updated_at = ?
                     WHERE job_id = ?
                     """,
                     (
-                        now.strftime("%Y-%m-%d %H:%M:%S"),
-                        next_at,
+                        running_at,
                         "Error",
                         str(exc),
-                        now.strftime("%Y-%m-%d %H:%M:%S"),
-                        job_id,
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        str(current["job_id"]),
                     ),
                 )
-                queue_activity("error", f"Night Patrol failed for {row['device_model']} / {row['csc']}: {exc}")
-        time.sleep(2)
+                queue_activity("error", f"Night Patrol failed for {current['device_model']} / {current['csc']}: {exc}")
+
+            remaining_rows = enabled_patrol_rows()
+            is_last_enabled = index >= max(len(remaining_rows) - 1, 0)
+            if remaining_rows and not is_last_enabled:
+                pause_message = "Waiting 15 seconds before the next device in this cycle."
+                execute_decrypt_db(
+                    "UPDATE patrol_jobs SET status = ?, last_message = ?, updated_at = ? WHERE enabled = 1",
+                    ("Cycle Pause", pause_message, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                )
+                if not patrol_pause_with_stop(15):
+                    break
+
+        active_rows = enabled_patrol_rows()
+        if not active_rows:
+            break
+        next_at_value = datetime.fromtimestamp(time.time() + cycle_interval).strftime("%Y-%m-%d %H:%M:%S")
+        waiting_message = f"Waiting for next cycle at {next_at_value}"
+        execute_decrypt_db(
+            """
+            UPDATE patrol_jobs
+            SET next_run = ?, status = ?, last_message = ?, updated_at = ?
+            WHERE enabled = 1
+            """,
+            (next_at_value, "Idle", waiting_message, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        if not patrol_pause_with_stop(cycle_interval):
+            break
 
 
 def ensure_patrol_workers() -> None:
     with PATROL_LOCK:
-        for row in patrol_job_rows():
-            if int(row["enabled"] or 0) != 1:
-                continue
-            job_id = str(row["job_id"])
-            worker = PATROL_THREADS.get(job_id)
-            if worker and worker.is_alive():
-                continue
-            thread = threading.Thread(target=patrol_worker, args=(job_id,), daemon=True)
-            PATROL_THREADS[job_id] = thread
-            thread.start()
+        if not with_decrypt_db("SELECT job_id FROM patrol_jobs WHERE enabled = 1 LIMIT 1", one=True):
+            PATROL_THREADS.pop(PATROL_COORDINATOR_KEY, None)
+            return
+        worker = PATROL_THREADS.get(PATROL_COORDINATOR_KEY)
+        if worker and worker.is_alive():
+            return
+        thread = threading.Thread(target=patrol_worker, daemon=True)
+        PATROL_THREADS[PATROL_COORDINATOR_KEY] = thread
+        thread.start()
 
 
 def finalize_imei_live_scan(
