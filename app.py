@@ -89,6 +89,7 @@ def init_state() -> None:
         "library_detail_row": None,
         "last_seen_notice_id": 0,
         "_legacy_sync_signature": "",
+        "requested_tab": None,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -1505,7 +1506,34 @@ def latest_decrypted_versions(model: str, csc: str, limit: int = 10) -> list[str
     return [str(row["firmware_found"]) for row in rows]
 
 
-@st.dialog("Use Decryptor", width="medium")
+def dismiss_firmware_picker_dialog() -> None:
+    st.session_state.firmware_picker_request = None
+
+
+def dismiss_delta_scan_dialog() -> None:
+    st.session_state.delta_scan_request = None
+    st.session_state.delta_scan_result = None
+    st.session_state.delta_scan_error = None
+
+
+def dismiss_download_dialog() -> None:
+    st.session_state.dialog_payload = None
+
+
+def dismiss_fota_fetch_dialog() -> None:
+    st.session_state.fota_live_request = None
+    st.session_state.fota_live_result = None
+    st.session_state.fota_live_error = None
+
+
+def dismiss_imei_scan_dialog() -> None:
+    st.session_state.imei_live_request = None
+    st.session_state.imei_live_result = None
+    st.session_state.imei_live_error = None
+    st.session_state.imei_live_state = None
+
+
+@st.dialog("Use Decryptor", width="medium", on_dismiss=dismiss_firmware_picker_dialog)
 def show_firmware_picker_dialog() -> None:
     request = st.session_state.get("firmware_picker_request")
     if not request:
@@ -1566,7 +1594,7 @@ def show_firmware_picker_dialog() -> None:
         st.rerun()
 
 
-@st.dialog("Delta Scan", width="medium")
+@st.dialog("Delta Scan", width="medium", on_dismiss=dismiss_delta_scan_dialog)
 def show_delta_scan_dialog() -> None:
     request = st.session_state.get("delta_scan_request")
     if not request:
@@ -3966,6 +3994,78 @@ def render_terminal_tab(snapshot_text: str) -> None:
     )
 
 
+def render_dashboard_launcher(tab_descriptions: dict[str, str]) -> None:
+    launch_items = [(name, desc) for name, desc in tab_descriptions.items() if name != "Dashboard"]
+    if not launch_items:
+        st.info("No workspaces are available.")
+        return
+
+    st.markdown(
+        """
+        <style>
+        .dashboard-launcher-item {
+            margin-bottom: 1.15rem;
+        }
+
+        .dashboard-launcher-title {
+            text-align: center;
+            font-size: 1.2rem;
+            font-weight: 760;
+            letter-spacing: -0.02em;
+            color: var(--text-main);
+            margin: 0 0 0.7rem 0;
+        }
+
+        [data-testid="stMainBlockContainer"] .dashboard-launcher-buttons .stButton > button {
+            min-height: 118px !important;
+            height: 100% !important;
+            white-space: break-spaces !important;
+            text-align: center !important;
+            justify-content: center !important;
+            align-items: center !important;
+            padding: 22px 24px !important;
+            line-height: 1.55 !important;
+            border-radius: 30px !important;
+            background: rgba(248, 251, 255, 0.62) !important;
+            color: var(--text-main) !important;
+            border: 1px solid rgba(255, 255, 255, 0.9) !important;
+            box-shadow: 0 16px 38px rgba(75, 102, 150, 0.12) !important;
+        }
+
+        [data-testid="stMainBlockContainer"] .dashboard-launcher-buttons .stButton > button:hover {
+            background: rgba(255, 255, 255, 0.72) !important;
+            border-color: rgba(124, 168, 255, 0.58) !important;
+            transform: translateY(-1px);
+        }
+
+        [data-testid="stMainBlockContainer"] .dashboard-launcher-buttons .stButton > button p {
+            white-space: break-spaces !important;
+            line-height: 1.55 !important;
+            font-size: 0.98rem !important;
+            margin: 0 !important;
+            text-align: center !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    columns_per_row = 2
+    for index in range(0, len(launch_items), columns_per_row):
+        cols = st.columns(columns_per_row, gap="large")
+        for col, item in zip(cols, launch_items[index : index + columns_per_row]):
+            name, desc = item
+            with col:
+                st.markdown("<div class='dashboard-launcher-item'>", unsafe_allow_html=True)
+                st.markdown(f"<div class='dashboard-launcher-title'>{html.escape(name)}</div>", unsafe_allow_html=True)
+                st.markdown("<div class='dashboard-launcher-buttons'>", unsafe_allow_html=True)
+                if st.button(desc, key=f"dashboard_launch_{name}", use_container_width=True):
+                    st.session_state.requested_tab = name
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+
+
 def render_login_page() -> None:
     st.markdown(
         """
@@ -4072,11 +4172,7 @@ def inject_styles() -> None:
         }
 
         [data-testid="stDecoration"] {
-            display: none !important;
-        }
-
-        #MainMenu {
-            display: none !important;
+            background: transparent !important;
         }
 
         a[title="GitHub"],
@@ -4964,18 +5060,18 @@ def inject_styles() -> None:
     )
 
 
-@st.dialog("Download Link")
+@st.dialog("Download Link", on_dismiss=dismiss_download_dialog)
 def show_download_dialog(payload: dict[str, Any]) -> None:
     st.caption("Copy this command and run it anywhere you want. The FOTA suffix has already been appended.")
     st.code(payload["curl_command"], language="bash")
     st.text_area("Copy-ready command", value=payload["curl_command"], height=160)
     st.link_button("Open final URL", payload["download_url"], use_container_width=True)
     if st.button("Close", key="close_dialog", use_container_width=True):
-        st.session_state.dialog_payload = None
+        dismiss_download_dialog()
         st.rerun()
 
 
-@st.dialog("Fetch Download Link", width="medium")
+@st.dialog("Fetch Download Link", width="medium", on_dismiss=dismiss_fota_fetch_dialog)
 def show_fota_fetch_dialog() -> None:
     request = st.session_state.get("fota_live_request")
     if not request:
@@ -5043,13 +5139,11 @@ def show_fota_fetch_dialog() -> None:
             st.error(result.get("status", "Lookup failed."))
 
     if st.button("Close", key="close_fota_live_dialog", use_container_width=True):
-        st.session_state.fota_live_request = None
-        st.session_state.fota_live_result = None
-        st.session_state.fota_live_error = None
+        dismiss_fota_fetch_dialog()
         st.rerun()
 
 
-@st.dialog("IMEI Scanner", width="medium")
+@st.dialog("IMEI Scanner", width="medium", on_dismiss=dismiss_imei_scan_dialog)
 def show_imei_scan_dialog() -> None:
     request = st.session_state.get("imei_live_request")
     if not request:
@@ -5280,10 +5374,7 @@ def show_imei_scan_dialog() -> None:
                 st.rerun()
 
     if st.button("Close", key="close_imei_live_dialog", use_container_width=True):
-        st.session_state.imei_live_request = None
-        st.session_state.imei_live_result = None
-        st.session_state.imei_live_error = None
-        st.session_state.imei_live_state = None
+        dismiss_imei_scan_dialog()
         st.rerun()
 
 
@@ -5438,7 +5529,9 @@ def ensure_workspace_databases() -> None:
                 level TEXT NOT NULL,
                 model TEXT,
                 csc TEXT,
-                message TEXT NOT NULL
+                message TEXT NOT NULL,
+                delivered INTEGER NOT NULL DEFAULT 0,
+                delivered_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS app_meta (
@@ -5461,6 +5554,17 @@ def ensure_workspace_databases() -> None:
             ON device_cscs (model, updated_at DESC);
             """
         )
+    try:
+        columns = {
+            str(row["name"])
+            for row in with_decrypt_db("PRAGMA table_info(notifications)")
+        }
+        if "delivered" not in columns:
+            execute_decrypt_db("ALTER TABLE notifications ADD COLUMN delivered INTEGER NOT NULL DEFAULT 0")
+        if "delivered_at" not in columns:
+            execute_decrypt_db("ALTER TABLE notifications ADD COLUMN delivered_at TEXT")
+    except sqlite3.Error:
+        pass
         conn.commit()
     with sqlite3.connect(ACTIVITY_DB_PATH) as conn:
         conn.executescript(
@@ -6319,27 +6423,29 @@ def imei_database_totals() -> tuple[int, int]:
 
 def notify_everyone(level: str, message: str, model: str = "", csc: str = "") -> None:
     execute_decrypt_db(
-        "INSERT INTO notifications (level, model, csc, message) VALUES (?, ?, ?, ?)",
+        "INSERT INTO notifications (level, model, csc, message, delivered, delivered_at) VALUES (?, ?, ?, ?, 0, NULL)",
         (level.upper(), normalize_model_number(model), normalize_csc_code(csc), message),
     )
 
 
 def surface_new_notifications() -> None:
-    last_seen = int(st.session_state.get("last_seen_notice_id", 0) or 0)
     rows = with_decrypt_db(
-        "SELECT id, level, message FROM notifications WHERE id > ? ORDER BY id ASC",
-        (last_seen,),
+        "SELECT id, level, message FROM notifications WHERE COALESCE(delivered, 0) = 0 ORDER BY id ASC",
     )
     if not rows:
         return
-    newest = last_seen
+    delivered_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for row in rows:
-        newest = max(newest, int(row["id"]))
         try:
             st.toast(str(row["message"]), icon="🔔")
         except Exception:
             pass
-    st.session_state.last_seen_notice_id = newest
+    execute_decrypt_db(
+        f"UPDATE notifications SET delivered = 1, delivered_at = ? WHERE id IN ({','.join(['?'] * len(rows))})",
+        (delivered_at, *[int(row["id"]) for row in rows]),
+    )
+    if rows:
+        st.session_state.last_seen_notice_id = max(int(row["id"]) for row in rows)
 
 
 def patrol_job_rows() -> list[sqlite3.Row]:
@@ -6820,7 +6926,7 @@ def main() -> None:
     guest_mode = is_guest_mode()
     if guest_mode:
         tab_descriptions = {
-            "Dashboard": "Overview of the whole system with select details redacted and limited to cached intelligence.",
+            "Dashboard": "Workspace launcher for the available tools in Guest Mode.",
             "FOTA Scanner": "Firmware fetching console with manual or database-backed model and CSC selection, with IMEI hidden in guest mode.",
             "Decryption": "Firmware decryptor that stores its own library of discovered firmwares by model number and CSC.",
             "Library": "Firmware discovery library grouped by model number with copy-ready curl links.",
@@ -6828,7 +6934,7 @@ def main() -> None:
         }
     else:
         tab_descriptions = {
-            "Dashboard": "Overview of connectivity, cached firmware intelligence, device readiness, and quick database health.",
+            "Dashboard": "Workspace launcher for all available tools and operational views.",
             "FOTA Scanner": "Live Samsung FOTA lookup console with manual entry, database-backed selection, decryptor-assisted bases, and optional IMEI scanning.",
             "Decryption": "Firmware decryption workspace backed by decrypted_firmware.db for enumerating builds per model and CSC.",
             "IMEI Scanner": "Sequential live IMEI probing console using manual or database-backed device selection and decryptor-assisted firmware bases.",
@@ -6840,6 +6946,10 @@ def main() -> None:
             "Terminal": "Settings placeholder for future deployment integrations and GitHub-connected feedback tools.",
         }
     tab_names = list(tab_descriptions.keys())
+    requested_tab = str(st.session_state.get("requested_tab") or "")
+    if requested_tab in tab_names:
+        st.session_state.active_tab = requested_tab
+    st.session_state.requested_tab = None
 
     active_tab = st.session_state.get("active_tab", "Dashboard")
     if active_tab not in tab_names:
@@ -6889,41 +6999,7 @@ def main() -> None:
             logout_to_login()
 
     if active_tab == "Dashboard":
-        if guest_mode:
-            render_guest_dashboard(st.session_state.status_snapshot, catalog)
-        else:
-            top_action_cols = st.columns([4.5, 1.2], gap="medium")
-            with top_action_cols[1]:
-                if st.button("↻ Refresh Dashboard", key="header_refresh_dashboard", use_container_width=True):
-                    refresh_snapshot(log_message=True)
-                    st.rerun()
-            # Admin mode keeps the full dashboard card set and detailed tables.
-            render_dashboard_cards(st.session_state.status_snapshot)
-            st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
-            lower_left, lower_right = st.columns(2, gap="large")
-            with lower_left:
-                render_html_table(
-                    "Category Overview",
-                    ["Category", "Devices", "Ready"],
-                    [list(row) for row in category_rows(catalog)],
-                    "No device categories found.",
-                )
-            with lower_right:
-                render_html_table(
-                    "Latest Cached Discoveries",
-                    ["Model", "CSC", "IMEI", "PDA", "Time"],
-                    [
-                        [
-                            row["device_model"],
-                            row["csc"],
-                            mask_imei(row["imei"], hidden_digits=4),
-                            short_version(row["found_pda"]),
-                            row["timestamp"],
-                        ]
-                        for row in recent_hits()
-                    ],
-                    "No firmware history is available yet.",
-                )
+        render_dashboard_launcher(tab_descriptions)
     elif active_tab == "FOTA Scanner":
         render_fota_tab(catalog, guest_mode=guest_mode)
     elif active_tab == "Decryption":
