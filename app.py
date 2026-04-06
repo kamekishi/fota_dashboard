@@ -1958,6 +1958,15 @@ def render_night_patrol_tab() -> None:
 
     if st.button("Start", key="night_patrol_start", use_container_width=True):
         upsert_patrol_jobs(entries)
+        if entries:
+            summary = ", ".join(f"{normalize_model_number(item['model'])} ({normalize_csc_code(item['csc'])})" for item in entries)
+            record_patrol_history(
+                "session-start",
+                normalize_model_number(entries[0]["model"]),
+                normalize_csc_code(entries[0]["csc"]),
+                "Started",
+                f"Night Patrol started for {summary} every {int(interval_minutes)} min.",
+            )
         ensure_patrol_workers()
         push_activity("sync", f"Night Patrol saved {len(entries)} selected devices.")
         st.rerun()
@@ -6911,7 +6920,6 @@ def stop_patrol_job(job_id: str) -> bool:
         """,
         ("Stopped", "Patrol stopped manually.", now, job_id),
     )
-    record_patrol_history(job_id, str(row["device_model"]), str(row["csc"]), "Stopped", "Patrol stopped manually.")
     with PATROL_LOCK:
         if not with_decrypt_db("SELECT job_id FROM patrol_jobs WHERE enabled = 1 LIMIT 1", one=True):
             PATROL_THREADS.pop(PATROL_COORDINATOR_KEY, None)
@@ -6975,7 +6983,6 @@ def patrol_worker() -> None:
                 """,
                 ("Running", f"Decrypting {model} / {csc}...", running_at, str(current["job_id"])),
             )
-            record_patrol_history(str(current["job_id"]), model, csc, "Running", f"Decrypting {model} / {csc}...")
             try:
                 before = latest_firmware_for_model_csc(model, csc)
                 result = decrypt_device_live(model, csc, persist=True)
@@ -6988,7 +6995,6 @@ def patrol_worker() -> None:
                     message = notice
                 else:
                     queue_activity("info", message)
-                record_patrol_history(str(current["job_id"]), model, csc, "Completed", message)
                 execute_decrypt_db(
                     """
                     UPDATE patrol_jobs
@@ -7018,7 +7024,6 @@ def patrol_worker() -> None:
                         str(current["job_id"]),
                     ),
                 )
-                record_patrol_history(str(current["job_id"]), model, csc, "Error", str(exc))
                 queue_activity("error", f"Night Patrol failed for {current['device_model']} / {current['csc']}: {exc}")
 
             remaining_rows = enabled_patrol_rows()
@@ -7029,7 +7034,6 @@ def patrol_worker() -> None:
                     "UPDATE patrol_jobs SET status = ?, last_message = ?, updated_at = ? WHERE enabled = 1",
                     ("Cycle Pause", pause_message, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
                 )
-                record_patrol_history(str(current["job_id"]), model, csc, "Cycle Pause", pause_message)
                 if not patrol_pause_with_stop(15):
                     break
 
@@ -7046,8 +7050,6 @@ def patrol_worker() -> None:
             """,
             (next_at_value, "Idle", waiting_message, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         )
-        for row in active_rows:
-            record_patrol_history(str(row["job_id"]), str(row["device_model"]), str(row["csc"]), "Idle", waiting_message)
         if not patrol_pause_with_stop(cycle_interval):
             break
 
