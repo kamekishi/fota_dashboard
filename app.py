@@ -1974,6 +1974,11 @@ def render_night_patrol_tab() -> None:
     rows = patrol_job_rows()
     if rows:
         st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='section-kicker'>Recent Night Patrols</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<div class='section-spacer-sm'></div>", unsafe_allow_html=True)
         header = st.columns([1.05, 0.65, 0.78, 1.05, 1.35, 0.85], gap="small")
         for col, label in zip(header, ["Model", "CSC", "Interval", "Next Run", "Status", "Action"]):
             col.markdown(f"<div class='imei-db-header'>{html.escape(label)}</div>", unsafe_allow_html=True)
@@ -1991,28 +1996,6 @@ def render_night_patrol_tab() -> None:
                             st.rerun()
                 else:
                     st.markdown("<div class='imei-db-cell'>Stopped</div>", unsafe_allow_html=True)
-
-    history_rows = recent_patrol_history(10)
-    if history_rows:
-        st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
-        st.markdown(
-            """
-            <section class="glass-card table-card">
-                <div class="section-kicker">Recent Night Patrols</div>
-            </section>
-            """,
-            unsafe_allow_html=True,
-        )
-        history_header = st.columns([1.15, 0.95, 0.65, 0.9, 2.0], gap="small")
-        for col, label in zip(history_header, ["Timestamp", "Model", "CSC", "Status", "Message"]):
-            col.markdown(f"<div class='imei-db-header'>{html.escape(label)}</div>", unsafe_allow_html=True)
-        for idx, row in enumerate(history_rows):
-            cols = st.columns([1.15, 0.95, 0.65, 0.9, 2.0], gap="small")
-            cols[0].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['created_at'] or '-'))}</div>", unsafe_allow_html=True)
-            cols[1].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['device_model'] or '-'))}</div>", unsafe_allow_html=True)
-            cols[2].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['csc'] or '-'))}</div>", unsafe_allow_html=True)
-            cols[3].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['status'] or '-'))}</div>", unsafe_allow_html=True)
-            cols[4].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['message'] or '-'))}</div>", unsafe_allow_html=True)
 
 
 def render_pathfinder_tab() -> None:
