@@ -40,7 +40,7 @@ PATROL_COORDINATOR_KEY = "__night_patrol__"
 
 
 st.set_page_config(
-    page_title="Project Killshot Authentication",
+    page_title="Project Killshot Dashboard",
     page_icon="KZ",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -95,6 +95,7 @@ def init_state() -> None:
         "fota_scanned_imei": "",
         "library_detail_row": None,
         "last_seen_notice_id": 0,
+        "pending_notifications": [],
         "_legacy_sync_signature": "",
         "requested_tab": None,
     }
@@ -121,6 +122,24 @@ def queue_activity(level: str, message: str) -> None:
     if not event:
         return
     write_activity_event(event["level"], event["tool"], event["message"])
+
+
+def queue_local_notification(message: str, icon: str = "🔔") -> None:
+    pending = list(st.session_state.get("pending_notifications", []) or [])
+    pending.append({"message": str(message), "icon": str(icon or "🔔")})
+    st.session_state.pending_notifications = pending
+
+
+def surface_local_notifications() -> None:
+    pending = list(st.session_state.get("pending_notifications", []) or [])
+    if not pending:
+        return
+    st.session_state.pending_notifications = []
+    for item in pending:
+        try:
+            st.toast(str(item.get("message", "")), icon=str(item.get("icon", "🔔")))
+        except Exception:
+            pass
 
 
 def sync_activity_feed() -> None:
@@ -6401,6 +6420,7 @@ def update_device_imei_by_model_csc(
         save_device_catalog(catalog)
 
     sync_runtime_imei_selection(clean_model, clean_csc, new_imei)
+    queue_local_notification(f"IMEI for {clean_model} has been updated.", icon="✅")
 
     if log_activity:
         push_activity("info", f"Updated {clean_model} / {clean_csc} to IMEI {new_imei} from {source_label}.")
@@ -7217,6 +7237,7 @@ def main() -> None:
         return
 
     surface_new_notifications()
+    surface_local_notifications()
 
     if st.session_state.snapshot_time is None:
         refresh_snapshot(log_message=False)
