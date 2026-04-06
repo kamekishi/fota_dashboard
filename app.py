@@ -28,6 +28,7 @@ DB_PATH = BASE_DIR / "fumo_history.db"
 DECRYPTED_DB_PATH = BASE_DIR / "decrypted_firmware.db"
 IMEI_DB_DIR = BASE_DIR / "imei_database"
 ACTIVITY_DB_PATH = BASE_DIR / "activity.db"
+NIGHT_PATROL_DB_PATH = BASE_DIR / "night_patrol.db"
 USER_AGENT = "SyncML DM Client"
 ADMIN_SECRET_CODE = "A7K9M2Q4X8P1L6N3R5T7V9Y2B4C6D8F1"
 MAX_ACTIVITY = 10
@@ -155,6 +156,19 @@ def with_activity_db(query: str, params: tuple[Any, ...] = (), *, one: bool = Fa
 
 def execute_activity_db(query: str, params: tuple[Any, ...] = ()) -> None:
     with sqlite3.connect(ACTIVITY_DB_PATH) as conn:
+        conn.execute(query, params)
+        conn.commit()
+
+
+def with_night_patrol_db(query: str, params: tuple[Any, ...] = (), *, one: bool = False) -> Any:
+    with sqlite3.connect(NIGHT_PATROL_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(query, params)
+        return cursor.fetchone() if one else cursor.fetchall()
+
+
+def execute_night_patrol_db(query: str, params: tuple[Any, ...] = ()) -> None:
+    with sqlite3.connect(NIGHT_PATROL_DB_PATH) as conn:
         conn.execute(query, params)
         conn.commit()
 
@@ -1473,7 +1487,7 @@ def render_imei_database_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
     default_csc = normalize_csc_code(selected_csc if selected_csc != "All CSCs" else csc_options_for_model(effective_model)[0] if csc_options_for_model(effective_model) else "")
     for idx, row in enumerate(rows):
         cols = st.columns([1.4, 0.7, 1.45, 0.8, 0.95], gap="small")
-        cols[0].markdown(f"<div class='imei-db-cell'>{html.escape(mask_imei(row['imei']))}</div>", unsafe_allow_html=True)
+        cols[0].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['imei']))}</div>", unsafe_allow_html=True)
         cols[1].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['csc']))}</div>", unsafe_allow_html=True)
         cols[2].markdown(
             f"<div class='imei-db-cell'>{html.escape(short_version(str(row['firmware_hit'] or '')) or '-')}</div>",
@@ -1872,7 +1886,7 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         for idx, row in enumerate(rows):
             cols = st.columns([0.7, 1.2, 1.2, 0.9, 1.45, 1.0], gap="small")
             cols[0].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['attempt']))}</div>", unsafe_allow_html=True)
-            cols[1].markdown(f"<div class='imei-db-cell'>{html.escape(mask_imei(str(row['imei'])))}</div>", unsafe_allow_html=True)
+            cols[1].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['imei']))}</div>", unsafe_allow_html=True)
             cols[2].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['status']))}</div>", unsafe_allow_html=True)
             cols[3].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['source']))}</div>", unsafe_allow_html=True)
             cols[4].markdown(f"<div class='imei-db-cell'>{html.escape(short_version(str(row['firmware'] or '')))}</div>", unsafe_allow_html=True)
@@ -1968,6 +1982,28 @@ def render_night_patrol_tab() -> None:
                             st.rerun()
                 else:
                     st.markdown("<div class='imei-db-cell'>Stopped</div>", unsafe_allow_html=True)
+
+    history_rows = recent_patrol_history(10)
+    if history_rows:
+        st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
+        st.markdown(
+            """
+            <section class="glass-card table-card">
+                <div class="section-kicker">Recent Night Patrols</div>
+            </section>
+            """,
+            unsafe_allow_html=True,
+        )
+        history_header = st.columns([1.15, 0.95, 0.65, 0.9, 2.0], gap="small")
+        for col, label in zip(history_header, ["Timestamp", "Model", "CSC", "Status", "Message"]):
+            col.markdown(f"<div class='imei-db-header'>{html.escape(label)}</div>", unsafe_allow_html=True)
+        for idx, row in enumerate(history_rows):
+            cols = st.columns([1.15, 0.95, 0.65, 0.9, 2.0], gap="small")
+            cols[0].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['created_at'] or '-'))}</div>", unsafe_allow_html=True)
+            cols[1].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['device_model'] or '-'))}</div>", unsafe_allow_html=True)
+            cols[2].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['csc'] or '-'))}</div>", unsafe_allow_html=True)
+            cols[3].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['status'] or '-'))}</div>", unsafe_allow_html=True)
+            cols[4].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['message'] or '-'))}</div>", unsafe_allow_html=True)
 
 
 def render_pathfinder_tab() -> None:
@@ -3211,6 +3247,7 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: boo
         if clean_value and clean_value not in base_options:
             base_options.append(clean_value)
     imei_options = known_imei_options(model, csc) if model and csc else []
+    guest_database_imei = effective_db_imei or (imei_options[0] if imei_options else "")
 
     if scan_mode == "Auto":
         base = st.selectbox(
@@ -3223,18 +3260,13 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: boo
             imei = st.selectbox(
                 "IMEI Source",
                 [""] + imei_options,
-                format_func=lambda value: "Select IMEI from database" if not value else mask_imei(value),
+                format_func=lambda value: "Select IMEI from database" if not value else value,
                 key="fota_v3_imei_auto",
             )
             if imei:
                 st.caption("Auto mode uses IMEIs saved from the app databases.")
         else:
-            imei = effective_db_imei
-            st.text_input("IMEI", value="Locked in Guest Mode", disabled=True, key="fota_v3_guest_imei_auto")
-            if effective_db_imei:
-                st.caption(f"Using whatever the IMEI stored in the database.")
-            else:
-                st.caption("Guest Mode requires a stored IMEI for this model and CSC.")
+            imei = guest_database_imei
     else:
         base_source = st.radio(
             "Base Firmware Source",
@@ -3272,12 +3304,7 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: boo
             base = current_value
 
         if guest_mode:
-            imei = effective_db_imei
-            st.text_input("IMEI", value="Locked in Guest Mode", disabled=True, key="fota_v3_guest_imei")
-            if effective_db_imei:
-                st.caption(f"Using stored IMEI ending in {effective_db_imei[-4:]}.")
-            else:
-                st.caption("Guest Mode requires a stored IMEI for this model and CSC.")
+            imei = guest_database_imei
         else:
             imei_source = st.radio(
                 "IMEI Source",
@@ -3289,7 +3316,7 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: boo
                 imei = st.selectbox(
                     "IMEI",
                     [""] + imei_options,
-                    format_func=lambda value: "Select IMEI from database" if not value else mask_imei(value),
+                    format_func=lambda value: "Select IMEI from database" if not value else value,
                     key="fota_v3_imei_db",
                 )
                 st.caption("Database mode uses known IMEIs from decrypted_firmware.db, IMEI Database, or fumo_history.db.")
@@ -3300,7 +3327,7 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: boo
                 st.text_input(
                     "IMEI",
                     value=current_imei,
-                    placeholder=mask_imei(current_imei) if current_imei else "Select IMEI via scanner",
+                    placeholder=current_imei if current_imei else "Select IMEI via scanner",
                     disabled=True,
                     key="fota_v3_imei_scanned",
                 )
@@ -3326,8 +3353,10 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: boo
                         st.session_state.imei_live_state = None
                         st.rerun()
                 if current_imei:
-                    st.caption(f"Selected IMEI: {mask_imei(current_imei)}")
+                    st.caption(f"Selected IMEI: {current_imei}")
 
+    if guest_mode:
+        st.caption("Available IMEIs for this device & CSC from the database will be used to fetch OTA.")
     if st.button("Fetch Download Link", key="fota_v3_fetch_live", use_container_width=True):
         if not model or not csc or not imei:
             st.error("Model number, CSC, and IMEI are required.")
@@ -3422,7 +3451,7 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
                 "Start IMEI",
                 imei_options,
                 index=imei_options.index(selected_start_imei),
-                format_func=lambda value: f"{value} ({mask_imei(value)})",
+                format_func=lambda value: value,
                 key="imei_v3_start_imei_select",
             )
             st.session_state.imei_v3_start_imei = start_imei
@@ -3468,7 +3497,7 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         for idx, row in enumerate(rows):
             cols = st.columns([0.7, 1.2, 1.25, 0.9, 1.35, 0.95], gap="small")
             cols[0].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['attempt']))}</div>", unsafe_allow_html=True)
-            cols[1].markdown(f"<div class='imei-db-cell'>{html.escape(mask_imei(str(row['imei'])))}</div>", unsafe_allow_html=True)
+            cols[1].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['imei']))}</div>", unsafe_allow_html=True)
             cols[2].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['status']))}</div>", unsafe_allow_html=True)
             cols[3].markdown(f"<div class='imei-db-cell'>{html.escape(str(row['source']))}</div>", unsafe_allow_html=True)
             cols[4].markdown(f"<div class='imei-db-cell'>{html.escape(short_version(str(row['firmware'] or '')))}</div>", unsafe_allow_html=True)
@@ -3955,7 +3984,7 @@ def render_imei_database_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
     )
     for idx, row in enumerate(rows):
         row_cols = st.columns([1.45, 0.72, 1.55, 0.88, 0.95], gap="small")
-        values = [mask_imei(str(row["imei"])), str(row["csc"]), short_version(str(row["firmware_hit"] or "")) or "-", int(row["hit_count"] or 0)]
+        values = [str(row["imei"]), str(row["csc"]), short_version(str(row["firmware_hit"] or "")) or "-", int(row["hit_count"] or 0)]
         for col, value in zip(row_cols[:-1], values):
             col.markdown(f"<div class='imei-db-cell'>{html.escape(str(value))}</div>", unsafe_allow_html=True)
         with row_cols[-1]:
@@ -5227,7 +5256,7 @@ def show_fota_fetch_dialog() -> None:
             attempted_results: list[dict[str, Any]] = []
 
             for index, candidate_imei in enumerate(candidates, start=1):
-                masked_imei = mask_imei(candidate_imei)
+                display_imei = candidate_imei
                 if candidate_imei != str(request.get("imei", "") or ""):
                     update_device_imei_by_model_csc(
                         request["model"],
@@ -5240,7 +5269,7 @@ def show_fota_fetch_dialog() -> None:
                     request["imei"] = candidate_imei
                     st.session_state.fota_live_request = request
 
-                status_box.write(f"Running live FOTA fetch with {masked_imei} ({index}/{total_candidates})...")
+                status_box.write(f"Running live FOTA fetch with {display_imei} ({index}/{total_candidates})...")
                 progress.progress(min(18 + int((index - 1) / total_candidates * 58), 78))
                 current_result = lookup_download_link(
                     request["model"],
@@ -5256,7 +5285,7 @@ def show_fota_fetch_dialog() -> None:
                     break
 
                 if is_no_update_result(current_result) and index < total_candidates:
-                    status_box.write(f"No update on {masked_imei}. Trying another known IMEI...")
+                    status_box.write(f"No update on {display_imei}. Trying another known IMEI...")
                     continue
 
                 result = current_result
@@ -5772,6 +5801,24 @@ def ensure_workspace_databases() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_activity_events_created
             ON activity_events (created_at DESC, id DESC);
+            """
+        )
+        conn.commit()
+    with sqlite3.connect(NIGHT_PATROL_DB_PATH) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS patrol_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                job_id TEXT,
+                device_model TEXT NOT NULL,
+                csc TEXT NOT NULL,
+                status TEXT NOT NULL,
+                message TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_patrol_history_created
+            ON patrol_history (created_at DESC, id DESC);
             """
         )
         conn.commit()
@@ -6777,6 +6824,35 @@ def patrol_job_rows() -> list[sqlite3.Row]:
     )
 
 
+def record_patrol_history(job_id: str, model: str, csc: str, status: str, message: str) -> None:
+    execute_night_patrol_db(
+        """
+        INSERT INTO patrol_history (created_at, job_id, device_model, csc, status, message)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            str(job_id or ""),
+            normalize_model_number(model),
+            normalize_csc_code(csc),
+            str(status or ""),
+            str(message or ""),
+        ),
+    )
+
+
+def recent_patrol_history(limit: int = 12) -> list[sqlite3.Row]:
+    return with_night_patrol_db(
+        """
+        SELECT created_at, device_model, csc, status, message
+        FROM patrol_history
+        ORDER BY datetime(created_at) DESC, id DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    )
+
+
 def upsert_patrol_jobs(jobs: list[dict[str, Any]]) -> None:
     current_ids = {job["job_id"] for job in jobs}
     execute_decrypt_db("UPDATE patrol_jobs SET enabled = 0, updated_at = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
@@ -6835,6 +6911,7 @@ def stop_patrol_job(job_id: str) -> bool:
         """,
         ("Stopped", "Patrol stopped manually.", now, job_id),
     )
+    record_patrol_history(job_id, str(row["device_model"]), str(row["csc"]), "Stopped", "Patrol stopped manually.")
     with PATROL_LOCK:
         if not with_decrypt_db("SELECT job_id FROM patrol_jobs WHERE enabled = 1 LIMIT 1", one=True):
             PATROL_THREADS.pop(PATROL_COORDINATOR_KEY, None)
@@ -6898,6 +6975,7 @@ def patrol_worker() -> None:
                 """,
                 ("Running", f"Decrypting {model} / {csc}...", running_at, str(current["job_id"])),
             )
+            record_patrol_history(str(current["job_id"]), model, csc, "Running", f"Decrypting {model} / {csc}...")
             try:
                 before = latest_firmware_for_model_csc(model, csc)
                 result = decrypt_device_live(model, csc, persist=True)
@@ -6910,6 +6988,7 @@ def patrol_worker() -> None:
                     message = notice
                 else:
                     queue_activity("info", message)
+                record_patrol_history(str(current["job_id"]), model, csc, "Completed", message)
                 execute_decrypt_db(
                     """
                     UPDATE patrol_jobs
@@ -6939,6 +7018,7 @@ def patrol_worker() -> None:
                         str(current["job_id"]),
                     ),
                 )
+                record_patrol_history(str(current["job_id"]), model, csc, "Error", str(exc))
                 queue_activity("error", f"Night Patrol failed for {current['device_model']} / {current['csc']}: {exc}")
 
             remaining_rows = enabled_patrol_rows()
@@ -6949,6 +7029,7 @@ def patrol_worker() -> None:
                     "UPDATE patrol_jobs SET status = ?, last_message = ?, updated_at = ? WHERE enabled = 1",
                     ("Cycle Pause", pause_message, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
                 )
+                record_patrol_history(str(current["job_id"]), model, csc, "Cycle Pause", pause_message)
                 if not patrol_pause_with_stop(15):
                     break
 
@@ -6965,6 +7046,8 @@ def patrol_worker() -> None:
             """,
             (next_at_value, "Idle", waiting_message, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         )
+        for row in active_rows:
+            record_patrol_history(str(row["job_id"]), str(row["device_model"]), str(row["csc"]), "Idle", waiting_message)
         if not patrol_pause_with_stop(cycle_interval):
             break
 
