@@ -46,6 +46,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+st.markdown("""
+    <style>
+    #GithubIcon {
+        visibility: hidden;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 def init_state() -> None:
     defaults = {
