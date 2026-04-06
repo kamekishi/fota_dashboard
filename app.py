@@ -40,7 +40,7 @@ PATROL_COORDINATOR_KEY = "__night_patrol__"
 
 
 st.set_page_config(
-    page_title="KinZoKu Dashboard",
+    page_title="Project Killshot Authentication",
     page_icon="KZ",
     layout="wide",
     initial_sidebar_state="expanded",
