@@ -5188,23 +5188,83 @@ def show_fota_fetch_dialog() -> None:
     if st.session_state.get("fota_live_result") is None and st.session_state.get("fota_live_error") is None:
         status_box = st.status("Starting live fetch...", expanded=True)
         progress = st.progress(0)
+        candidates = fota_fallback_imei_candidates(
+            request["model"],
+            request["csc"],
+            request["imei"],
+        )
+        total_candidates = max(len(candidates), 1)
         status_box.write("Checking local cache and preparing the Samsung OTA request...")
-        progress.progress(18)
+        progress.progress(10)
         try:
-            status_box.write("Running live FOTA fetch...")
-            progress.progress(42)
-            result = lookup_download_link(
-                request["model"],
-                request["csc"],
-                request["imei"],
-                request.get("base"),
-                use_cache=False,
-            )
-            progress.progress(82)
+            result: dict[str, Any] | None = None
+            attempted_results: list[dict[str, Any]] = []
+
+            for index, candidate_imei in enumerate(candidates, start=1):
+                masked_imei = mask_imei(candidate_imei)
+                if candidate_imei != str(request.get("imei", "") or ""):
+                    update_device_imei_by_model_csc(
+                        request["model"],
+                        request["csc"],
+                        candidate_imei,
+                        "FOTA Scanner",
+                        log_activity=False,
+                        report_invalid=False,
+                    )
+                    request["imei"] = candidate_imei
+                    st.session_state.fota_live_request = request
+
+                status_box.write(f"Running live FOTA fetch with {masked_imei} ({index}/{total_candidates})...")
+                progress.progress(min(18 + int((index - 1) / total_candidates * 58), 78))
+                current_result = lookup_download_link(
+                    request["model"],
+                    request["csc"],
+                    candidate_imei,
+                    request.get("base"),
+                    use_cache=False,
+                )
+                attempted_results.append(current_result)
+
+                if current_result.get("kind") in {"update", "dm"}:
+                    result = current_result
+                    break
+
+                if is_no_update_result(current_result) and index < total_candidates:
+                    status_box.write(f"No update on {masked_imei}. Trying another known IMEI...")
+                    continue
+
+                result = current_result
+                break
+
+            if result is None:
+                result = {
+                    "kind": "uptodate",
+                    "status": "All IMEIs has failed to fetch OTA for this device. Please scan more IMEIs.",
+                    "model": request["model"],
+                    "csc": request["csc"],
+                    "imei": request["imei"],
+                    "base": request.get("base", ""),
+                    "found_pda": request.get("base", ""),
+                }
+
+            if attempted_results and not any(item.get("kind") in {"update", "dm"} for item in attempted_results):
+                if all(is_no_update_result(item) for item in attempted_results):
+                    result = {
+                        **result,
+                        "kind": "uptodate",
+                        "status": "All IMEIs has failed to fetch OTA for this device. Please scan more IMEIs.",
+                    }
+
+            progress.progress(88)
             st.session_state.fota_live_result = result
             st.session_state.last_result = result
             progress.progress(100)
-            status_box.update(label="Fetch complete", state="complete")
+            if result.get("kind") in {"update", "dm"}:
+                status_box.update(label="Fetch complete", state="complete")
+            elif result.get("kind") == "uptodate":
+                status_box.update(label="No OTA fetched", state="complete")
+            else:
+                status_box.update(label="Fetch failed", state="error")
         except Exception as exc:
             st.session_state.fota_live_error = str(exc)
             progress.progress(100)
@@ -5241,7 +5301,7 @@ def show_fota_fetch_dialog() -> None:
                     st.session_state.dialog_payload = result
                     st.rerun()
         elif result.get("kind") == "uptodate":
-            st.info(result.get("status", "No update found."))
+            st.warning(result.get("status", "No update found."))
         else:
             st.error(result.get("status", "Lookup failed."))
 
@@ -6274,11 +6334,52 @@ def known_imei_options(model: str, csc: str) -> list[str]:
     )
 
 
-def update_device_imei_by_model_csc(model: str, csc: str, new_imei: str, source_label: str) -> bool:
+def scanner_device_context(prefix: str) -> tuple[str, str]:
+    mode = str(st.session_state.get(f"{prefix}_device_mode", "Auto") or "Auto")
+    if mode == "Manual":
+        model = normalize_model_number(st.session_state.get(f"{prefix}_manual_model", ""))
+        csc = normalize_csc_code(st.session_state.get(f"{prefix}_manual_csc", ""))
+    else:
+        model = normalize_model_number(st.session_state.get(f"{prefix}_selected_model", ""))
+        csc = normalize_csc_code(st.session_state.get(f"{prefix}_selected_csc", ""))
+    return model, csc
+
+
+def sync_runtime_imei_selection(model: str, csc: str, new_imei: str) -> None:
+    clean_model = normalize_model_number(model)
+    clean_csc = normalize_csc_code(csc)
+    if not clean_model or not clean_csc:
+        return
+
+    if st.session_state.get("scan_model", "").upper() == clean_model and st.session_state.get("scan_csc", "").upper() == clean_csc:
+        st.session_state.scan_imei = new_imei
+    if st.session_state.get("model_input", "").upper() == clean_model and st.session_state.get("csc_input", "").upper() == clean_csc:
+        st.session_state.imei_input = new_imei
+
+    if scanner_device_context("fota_v3") == (clean_model, clean_csc):
+        st.session_state.fota_v3_imei_auto = new_imei
+        st.session_state.fota_v3_imei_db = new_imei
+        st.session_state.fota_v3_imei_manual = new_imei
+        st.session_state.fota_v3_imei_scanned = new_imei
+    if scanner_device_context("imei_v3") == (clean_model, clean_csc):
+        st.session_state.imei_v3_start_imei = new_imei
+        st.session_state.imei_v3_start_imei_select = new_imei
+
+
+def update_device_imei_by_model_csc(
+    model: str,
+    csc: str,
+    new_imei: str,
+    source_label: str,
+    *,
+    log_activity: bool = True,
+    report_invalid: bool = True,
+) -> bool:
     clean_model = normalize_model_number(model)
     clean_csc = normalize_csc_code(csc)
     if not new_imei.isdigit() or len(new_imei) != 15:
-        st.error("IMEI must be exactly 15 digits.")
+        if report_invalid:
+            st.error("IMEI must be exactly 15 digits.")
         return False
 
     ensure_known_device(clean_model, clean_csc, imei=new_imei)
@@ -6292,13 +6393,30 @@ def update_device_imei_by_model_csc(model: str, csc: str, new_imei: str, source_
     if changed:
         save_device_catalog(catalog)
 
-    if st.session_state.get("scan_model", "").upper() == clean_model and st.session_state.get("scan_csc", "").upper() == clean_csc:
-        st.session_state.scan_imei = new_imei
-    if st.session_state.get("model_input", "").upper() == clean_model and st.session_state.get("csc_input", "").upper() == clean_csc:
-        st.session_state.imei_input = new_imei
+    sync_runtime_imei_selection(clean_model, clean_csc, new_imei)
 
-    push_activity("info", f"Updated {clean_model} / {clean_csc} to IMEI {new_imei} from {source_label}.")
+    if log_activity:
+        push_activity("info", f"Updated {clean_model} / {clean_csc} to IMEI {new_imei} from {source_label}.")
     return True
+
+
+def is_no_update_result(result: dict[str, Any]) -> bool:
+    if str(result.get("kind", "")).lower() == "uptodate":
+        return True
+    status_text = str(result.get("status", "") or "").lower()
+    return "260" in status_text or "no update" in status_text
+
+
+def fota_fallback_imei_candidates(model: str, csc: str, preferred_imei: str) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in [preferred_imei, *known_imei_options(model, csc)]:
+        clean_value = str(value or "").strip()
+        if not clean_value or clean_value in seen:
+            continue
+        seen.add(clean_value)
+        ordered.append(clean_value)
+    return ordered
 
 
 @st.cache_data(show_spinner=False)
