@@ -1666,7 +1666,13 @@ def show_delta_scan_dialog() -> None:
 
 
 def scanner_device_input(prefix: str) -> tuple[str, str, str, str]:
-    mode = st.toggle("Use database device source", key=f"{prefix}_use_db")
+    selection_mode = st.radio(
+        "Device Selection Mode",
+        ["Auto", "Manual"],
+        horizontal=True,
+        key=f"{prefix}_device_mode",
+    )
+    use_database_mode = selection_mode == "Auto"
     model_options = model_options_from_decrypt_db()
     model = ""
     csc = ""
@@ -1679,14 +1685,14 @@ def scanner_device_input(prefix: str) -> tuple[str, str, str, str]:
             [""] + model_options,
             format_func=lambda value: "Select a model" if not value else value,
             key=f"{prefix}_selected_model",
-            disabled=not mode,
+            disabled=not use_database_mode,
         )
         manual_model = st.text_input(
             "Device Model (Manual)",
             key=f"{prefix}_manual_model",
-            disabled=mode,
+            disabled=use_database_mode,
         )
-    resolved_model = normalize_model_number(selected_model if mode else manual_model)
+    resolved_model = normalize_model_number(selected_model if use_database_mode else manual_model)
     with right:
         csc_options = csc_options_for_model(resolved_model)
         selected_csc = st.selectbox(
@@ -1694,15 +1700,15 @@ def scanner_device_input(prefix: str) -> tuple[str, str, str, str]:
             [""] + csc_options,
             format_func=lambda value: "Select a CSC" if not value else value,
             key=f"{prefix}_selected_csc",
-            disabled=not mode,
+            disabled=not use_database_mode,
         )
         manual_csc = st.text_input(
             "CSC (Manual)",
             key=f"{prefix}_manual_csc",
-            disabled=mode,
+            disabled=use_database_mode,
         )
     model = resolved_model
-    csc = normalize_csc_code(selected_csc if mode else manual_csc)
+    csc = normalize_csc_code(selected_csc if use_database_mode else manual_csc)
     if model:
         context = best_device_context(model, csc)
         imei = context.get("imei", "")
@@ -4032,23 +4038,30 @@ def render_dashboard_launcher(tab_descriptions: dict[str, str]) -> None:
     st.markdown(
         """
         <style>
-        [data-testid="stMainBlockContainer"] div[data-testid="stVerticalBlock"]:has(> div[data-testid="element-container"] .dashboard-launcher-marker) {
-            padding: 1.3rem 1.2rem 1.15rem;
-            border-radius: 32px;
+        [data-testid="stMainBlockContainer"] div[data-testid="stVerticalBlockBorderWrapper"]:has(.dashboard-launcher-marker) {
+            border: 0 !important;
+            background: transparent !important;
+            box-shadow: none !important;
+        }
+
+        [data-testid="stMainBlockContainer"] div[data-testid="stVerticalBlockBorderWrapper"]:has(.dashboard-launcher-marker) > div[data-testid="stVerticalBlock"],
+        [data-testid="stMainBlockContainer"] div[data-testid="stVerticalBlock"]:has(.dashboard-launcher-marker) {
+            padding: 1rem 1.05rem 1.1rem;
+            border-radius: 28px;
             min-height: 100%;
             position: relative;
             overflow: hidden;
             background:
-                radial-gradient(circle at top left, rgba(255,255,255,0.50), transparent 36%),
-                radial-gradient(circle at bottom right, rgba(120, 172, 255, 0.12), transparent 34%),
-                linear-gradient(180deg, rgba(255,255,255,0.44), rgba(255,255,255,0.16));
-            border: 1px solid rgba(255,255,255,0.40);
+                radial-gradient(circle at top left, rgba(255,255,255,0.45), transparent 34%),
+                radial-gradient(circle at bottom right, rgba(120, 172, 255, 0.10), transparent 32%),
+                linear-gradient(180deg, rgba(255,255,255,0.52), rgba(255,255,255,0.26));
+            border: 1px solid rgba(255,255,255,0.42);
             box-shadow:
-                0 22px 46px rgba(43, 64, 102, 0.14),
-                0 4px 14px rgba(255,255,255,0.10) inset,
-                0 1px 0 rgba(255,255,255,0.38) inset;
-            backdrop-filter: blur(28px) saturate(130%);
-            -webkit-backdrop-filter: blur(28px) saturate(130%);
+                0 14px 28px rgba(43, 64, 102, 0.10),
+                0 3px 10px rgba(255,255,255,0.12) inset,
+                0 1px 0 rgba(255,255,255,0.42) inset;
+            backdrop-filter: blur(24px) saturate(122%);
+            -webkit-backdrop-filter: blur(24px) saturate(122%);
         }
 
         .dashboard-launcher-item {
@@ -4061,7 +4074,7 @@ def render_dashboard_launcher(tab_descriptions: dict[str, str]) -> None:
 
         .dashboard-launcher-button-wrap {
             width: 100%;
-            max-width: 240px;
+            max-width: 152px;
             margin: 0 auto;
         }
 
@@ -4080,31 +4093,31 @@ def render_dashboard_launcher(tab_descriptions: dict[str, str]) -> None:
 
         [data-testid="stMainBlockContainer"] .dashboard-launcher-button-wrap .stButton > button {
             width: 100% !important;
-            min-height: 52px !important;
-            white-space: normal !important;
+            min-height: 42px !important;
+            white-space: nowrap !important;
             text-align: center !important;
             justify-content: center !important;
             align-items: center !important;
-            padding: 0.2rem 1rem !important;
+            padding: 0.15rem 0.9rem !important;
             border-radius: 999px !important;
-            background: linear-gradient(135deg, #2d72ff, #63bbff) !important;
+            background: linear-gradient(135deg, #3088db, #59b0f1) !important;
             color: white !important;
             border: 0 !important;
-            box-shadow: 0 12px 26px rgba(58, 117, 228, 0.22) !important;
+            box-shadow: 0 10px 18px rgba(58, 117, 228, 0.18) !important;
         }
 
         [data-testid="stMainBlockContainer"] .dashboard-launcher-button-wrap .stButton > button:hover {
-            background: linear-gradient(135deg, #2467ef, #58b4ff) !important;
+            background: linear-gradient(135deg, #277ed2, #50a8eb) !important;
             transform: translateY(-1px);
         }
 
         [data-testid="stMainBlockContainer"] .dashboard-launcher-button-wrap .stButton > button p {
-            white-space: normal !important;
-            line-height: 1.15 !important;
-            font-size: 1rem !important;
+            white-space: nowrap !important;
+            line-height: 1 !important;
+            font-size: 0.96rem !important;
             margin: 0 !important;
             text-align: center !important;
-            font-weight: 760 !important;
+            font-weight: 720 !important;
             letter-spacing: -0.01em !important;
         }
 
@@ -4112,17 +4125,18 @@ def render_dashboard_launcher(tab_descriptions: dict[str, str]) -> None:
             width: 100%;
             height: 1px;
             border-radius: 999px;
-            margin: 0.1rem 0 0.15rem;
-            background: linear-gradient(90deg, rgba(120, 144, 176, 0.04), rgba(120, 144, 176, 0.30), rgba(120, 144, 176, 0.04));
+            margin: 0.7rem 0 0.7rem;
+            background: linear-gradient(90deg, rgba(120, 144, 176, 0.03), rgba(120, 144, 176, 0.24), rgba(120, 144, 176, 0.03));
         }
 
         .dashboard-launcher-subtitle {
-            max-width: 42ch;
-            margin: 0.1rem auto 0;
-            color: var(--text-soft);
-            font-size: 0.98rem;
-            line-height: 1.55;
+            max-width: 28ch;
+            margin: 0 auto;
+            color: rgba(33, 48, 72, 0.92);
+            font-size: 0.92rem;
+            line-height: 1.45;
             text-align: center;
+            font-weight: 500;
         }
         </style>
         """,
@@ -4138,7 +4152,7 @@ def render_dashboard_launcher(tab_descriptions: dict[str, str]) -> None:
                 st.markdown("<div class='dashboard-launcher-item'>", unsafe_allow_html=True)
                 with st.container():
                     st.markdown("<div class='dashboard-launcher-marker'></div>", unsafe_allow_html=True)
-                    left_pad, center_button, right_pad = st.columns([1, 1, 1], gap="small")
+                    left_pad, center_button, right_pad = st.columns([1, 1, 1], gap="medium")
                     with left_pad:
                         st.markdown("<div class='dashboard-launcher-spacer'></div>", unsafe_allow_html=True)
                     with center_button:
@@ -7087,23 +7101,23 @@ def main() -> None:
     if guest_mode:
         tab_descriptions = {
             "Dashboard": "Workspace launcher for the available tools in Guest Mode.",
-            "FOTA Scanner": "Firmware fetching console with manual or database-backed model and CSC selection, with IMEI hidden in guest mode.",
-            "Decryption": "Firmware decryptor that stores its own library of discovered firmwares by model number and CSC.",
-            "Library": "Firmware discovery library grouped by model number with copy-ready curl links.",
-            "Device Vault": "Model-grouped device vault built from decrypted firmware records and firmware history.",
+            "FOTA Scanner": "Live Samsung FOTA lookup with manual or database-backed device selection.",
+            "Decryption": "Firmware decryptor with a built-in library of discovered builds by model and CSC.",
+            "Library": "Firmware discovery library with copy-ready curl links.",
+            "Device Vault": "Device list built from decrypted firmware records and firmware history.",
         }
     else:
         tab_descriptions = {
             "Dashboard": "Workspace launcher for all available tools and operational views.",
-            "FOTA Scanner": "Live Samsung FOTA lookup console with manual entry, database-backed selection, decryptor-assisted bases, and optional IMEI scanning.",
-            "Decryption": "Firmware decryption workspace backed by decrypted_firmware.db for enumerating builds per model and CSC.",
-            "IMEI Scanner": "Sequential live IMEI probing console using manual or database-backed device selection and decryptor-assisted firmware bases.",
-            "IMEI Database": "Per-model IMEI databases sourced from scan hits, with FUMO history import and one-tap IMEI replacement.",
-            "Library": "Firmware discovery library grouped by model number with copy-ready curl links.",
-            "Device Vault": "Model-grouped device vault sourced from decrypted firmware records and firmware history.",
-            "Night Patrol": "Persistent background decryption cycles for up to three selected devices with shared update notifications.",
-            "Pathfinder": "Delta scan workspace that probes the latest decrypted firmwares to map their next OTA targets and links.",
-            "Terminal": "Settings placeholder for future deployment integrations and GitHub-connected feedback tools.",
+            "FOTA Scanner": "Live Samsung FOTA lookup with manual entry, database selection, and IMEI tools.",
+            "Decryption": "Decryption workspace for discovering builds by model number and CSC.",
+            "IMEI Scanner": "Live IMEI probing with manual or database-backed device and firmware selection.",
+            "IMEI Database": "Per-model IMEI records from scan hits, with FUMO history import.",
+            "Library": "Firmware discovery library with copy-ready curl links.",
+            "Device Vault": "Device list sourced from decrypted firmware records and firmware history.",
+            "Night Patrol": "Recurring background decryption cycles with shared update alerts.",
+            "Pathfinder": "Delta scan workspace for mapping OTA jumps from decrypted builds.",
+            "Terminal": "Settings space for future deployment and feedback integrations.",
         }
     tab_names = list(tab_descriptions.keys())
     requested_tab = str(st.session_state.get("requested_tab") or "")
