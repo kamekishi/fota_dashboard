@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import html
+import io
 import json
 import re
+import requests
 import socket
 import sqlite3
 import threading
 import time
 import textwrap
+from hashlib import md5
 from datetime import datetime
 from math import ceil
 from pathlib import Path
@@ -17,6 +20,7 @@ import xml.etree.ElementTree as ET
 
 import streamlit as st
 import streamlit.components.v1 as components
+from googleapiclient.http import MediaIoBaseDownload
 
 import dc3
 import ota
@@ -38,6 +42,44 @@ ACTIVITY_QUEUE: list[dict[str, str]] = []
 PATROL_LOCK = threading.Lock()
 PATROL_THREADS: dict[str, threading.Thread] = {}
 PATROL_COORDINATOR_KEY = "__night_patrol__"
+CLOUD_SYNC_LOCK = threading.Lock()
+CLOUD_METADATA_LOCK = threading.Lock()
+CLOUD_UPLOAD_TIMERS: dict[str, threading.Timer] = {}
+CLOUD_METADATA_CACHE: dict[str, dict[str, Any]] = {}
+CLOUD_WRITE_BACKOFF: dict[str, float] = {}
+CLOUD_METADATA_TTL_SECONDS = 30.0
+CLOUD_UPLOAD_DEBOUNCE_SECONDS = 2.0
+CLOUD_WRITE_BACKOFF_SECONDS = 300.0
+
+DRIVE_FILE_IDS = {
+    "devices": "1bylTp7SYQdcXRlNA6nlTFmV0q8jK_8_r",
+    "history": "15he9xyKW8C1080qIzpl8XJ4w2eJdfIjz",
+    "decrypted": "1yY006wEHs9H8xMJ60kO3lAnw1KJi7Z9S",
+    "activity": "1EfCqXmWipKerFKiPT2VJGhm0V8SpNMfP",
+}
+
+CLOUD_BACKED_FILES = {
+    DEVICES_PATH: {
+        "id": DRIVE_FILE_IDS["devices"],
+        "mime": "application/json",
+        "link": "https://drive.google.com/file/d/1bylTp7SYQdcXRlNA6nlTFmV0q8jK_8_r/view?usp=sharing",
+    },
+    DB_PATH: {
+        "id": DRIVE_FILE_IDS["history"],
+        "mime": "application/x-sqlite3",
+        "link": "https://drive.google.com/file/d/15he9xyKW8C1080qIzpl8XJ4w2eJdfIjz/view?usp=sharing",
+    },
+    DECRYPTED_DB_PATH: {
+        "id": DRIVE_FILE_IDS["decrypted"],
+        "mime": "application/x-sqlite3",
+        "link": "https://drive.google.com/file/d/1yY006wEHs9H8xMJ60kO3lAnw1KJi7Z9S/view?usp=sharing",
+    },
+    ACTIVITY_DB_PATH: {
+        "id": DRIVE_FILE_IDS["activity"],
+        "mime": "application/x-sqlite3",
+        "link": "https://drive.google.com/file/d/1EfCqXmWipKerFKiPT2VJGhm0V8SpNMfP/view?usp=sharing",
+    },
+}
 
 
 st.set_page_config(
@@ -171,6 +213,221 @@ def execute_night_patrol_db(query: str, params: tuple[Any, ...] = ()) -> None:
     with sqlite3.connect(NIGHT_PATROL_DB_PATH) as conn:
         conn.execute(query, params)
         conn.commit()
+
+
+def cloud_file_config(path: Path) -> dict[str, str] | None:
+    return CLOUD_BACKED_FILES.get(path)
+
+
+def get_drive_service_safe() -> Any | None:
+    try:
+        return ota.get_drive_service()
+    except Exception as exc:
+        print(f"[cloud-sync] Drive service unavailable: {exc}")
+        return None
+
+
+def drive_metadata(file_id: str, *, force: bool = False) -> dict[str, Any] | None:
+    now_ts = time.time()
+    with CLOUD_METADATA_LOCK:
+        cached = CLOUD_METADATA_CACHE.get(file_id)
+        if cached and not force and (now_ts - float(cached.get("fetched_at", 0.0))) < CLOUD_METADATA_TTL_SECONDS:
+            return dict(cached.get("meta", {}))
+
+    service = get_drive_service_safe()
+    if service is None:
+        return None
+
+    try:
+        meta = service.files().get(
+            fileId=file_id,
+            fields="id, name, modifiedTime, md5Checksum, size",
+            supportsAllDrives=True,
+        ).execute()
+    except Exception as exc:
+        print(f"[cloud-sync] Failed to read Drive metadata for {file_id}: {exc}")
+        return None
+
+    with CLOUD_METADATA_LOCK:
+        CLOUD_METADATA_CACHE[file_id] = {"fetched_at": now_ts, "meta": dict(meta)}
+    return dict(meta)
+
+
+def local_file_md5(path: Path) -> str:
+    digest = md5()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def download_drive_file(file_id: str, destination: Path) -> bool:
+    service = get_drive_service_safe()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = destination.with_suffix(destination.suffix + ".part")
+    if service is not None:
+        try:
+            request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+            with temp_path.open("wb") as handle:
+                downloader = MediaIoBaseDownload(handle, request)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+            temp_path.replace(destination)
+            return True
+        except Exception as exc:
+            print(f"[cloud-sync] API download failed for {destination.name}: {exc}")
+
+    config = cloud_file_config(destination) or {}
+    direct_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    session = requests.Session()
+    try:
+        response = session.get(direct_url, stream=True, timeout=30)
+        response.raise_for_status()
+        content_type = str(response.headers.get("Content-Type", "")).lower()
+        if "text/html" in content_type:
+            page = response.text
+            confirm = ""
+            match = re.search(r"confirm=([0-9A-Za-z_]+)", page)
+            if match:
+                confirm = match.group(1)
+            if confirm:
+                response = session.get(
+                    direct_url,
+                    params={"confirm": confirm, "id": file_id, "export": "download"},
+                    stream=True,
+                    timeout=30,
+                )
+                response.raise_for_status()
+            else:
+                raise RuntimeError(f"Public download confirmation failed for {config.get('link', file_id)}")
+
+        with temp_path.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    handle.write(chunk)
+        temp_path.replace(destination)
+        return True
+    except Exception as exc:
+        print(f"[cloud-sync] Public download failed for {destination.name}: {exc}")
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+
+def upload_drive_file(path: Path, *, force: bool = False) -> bool:
+    config = cloud_file_config(path)
+    if config is None or not path.exists():
+        return False
+    path_key = str(path.resolve())
+    blocked_until = float(CLOUD_WRITE_BACKOFF.get(path_key, 0.0))
+    if not force and blocked_until > time.time():
+        return False
+
+    remote_meta = drive_metadata(config["id"], force=force)
+    if remote_meta is None:
+        CLOUD_WRITE_BACKOFF[path_key] = time.time() + CLOUD_WRITE_BACKOFF_SECONDS
+        return False
+
+    if not force and remote_meta.get("md5Checksum"):
+        try:
+            if local_file_md5(path) == str(remote_meta.get("md5Checksum")):
+                return True
+        except Exception:
+            pass
+
+    service = get_drive_service_safe()
+    if service is None:
+        return False
+
+    try:
+        media = ota.MediaFileUpload(str(path), mimetype=config.get("mime"), resumable=False)
+        service.files().update(
+            fileId=config["id"],
+            media_body=media,
+            fields="id, modifiedTime, md5Checksum",
+            supportsAllDrives=True,
+        ).execute()
+        CLOUD_WRITE_BACKOFF.pop(path_key, None)
+        drive_metadata(config["id"], force=True)
+        return True
+    except Exception as exc:
+        message = str(exc).lower()
+        if any(marker in message for marker in ["not found", "404", "insufficient", "forbidden", "permission"]):
+            CLOUD_WRITE_BACKOFF[path_key] = time.time() + CLOUD_WRITE_BACKOFF_SECONDS
+        print(f"[cloud-sync] Failed to upload {path.name}: {exc}")
+        return False
+
+
+def schedule_cloud_upload(path: Path) -> None:
+    config = cloud_file_config(path)
+    if config is None:
+        return
+
+    key = str(path.resolve())
+
+    def runner() -> None:
+        try:
+            upload_drive_file(path)
+        finally:
+            with CLOUD_SYNC_LOCK:
+                CLOUD_UPLOAD_TIMERS.pop(key, None)
+
+    with CLOUD_SYNC_LOCK:
+        existing = CLOUD_UPLOAD_TIMERS.get(key)
+        if existing is not None:
+            existing.cancel()
+        timer = threading.Timer(CLOUD_UPLOAD_DEBOUNCE_SECONDS, runner)
+        timer.daemon = True
+        CLOUD_UPLOAD_TIMERS[key] = timer
+        timer.start()
+
+
+def ensure_cloud_backing_files(*, force: bool = False) -> None:
+    for path, config in CLOUD_BACKED_FILES.items():
+        remote_meta = drive_metadata(config["id"], force=force)
+        if remote_meta is None:
+            if force or not path.exists():
+                download_drive_file(config["id"], path)
+            continue
+
+        needs_download = force or not path.exists()
+        if not needs_download and path.exists():
+            try:
+                remote_ts = datetime.fromisoformat(str(remote_meta["modifiedTime"]).replace("Z", "+00:00")).timestamp()
+                local_ts = path.stat().st_mtime
+                if remote_ts > local_ts + 1:
+                    needs_download = True
+                elif str(remote_meta.get("md5Checksum") or ""):
+                    needs_download = local_file_md5(path) != str(remote_meta.get("md5Checksum"))
+            except Exception:
+                needs_download = False
+
+        if needs_download:
+            download_drive_file(config["id"], path)
+
+
+def cloud_sync_status_rows() -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    now_ts = time.time()
+    for path, config in CLOUD_BACKED_FILES.items():
+        file_id = str(config["id"])
+        remote_meta = drive_metadata(file_id)
+        blocked_until = float(CLOUD_WRITE_BACKOFF.get(str(path.resolve()), 0.0))
+        read_mode = "Read-Write" if remote_meta and blocked_until <= now_ts else "Read-Only"
+        detail = "Drive API linked" if remote_meta else "Public link fallback"
+        if blocked_until > now_ts:
+            detail = "Write access unavailable"
+        rows.append(
+            {
+                "name": path.name,
+                "mode": read_mode,
+                "detail": detail,
+            }
+        )
+    return rows
 
 
 def extract_model_and_csc(message: str) -> tuple[str, str]:
@@ -546,11 +803,15 @@ def build_download_filename(
     target_version: str | None,
     url: str | None,
 ) -> str:
+    target_short = short_version(target_version)
+    is_dm = ".DM" in (url or "").upper() or ".DM" in (target_version or "").upper()
+    if is_dm and target_short.upper().endswith(".DM"):
+        target_short = target_short[:-3]
     filename = (
         f"{model}_{resolve_real_csc(csc, target_version)}_"
-        f"{short_version(base_version)}_{short_version(target_version)}.zip"
+        f"{short_version(base_version)}_{target_short}.zip"
     )
-    if ".DM" in (url or "").upper() or ".DM" in (target_version or "").upper():
+    if is_dm:
         return filename.replace(".zip", ".DM.zip")
     return filename
 
@@ -3217,6 +3478,22 @@ def render_fota_tab(catalog: dict[str, list[dict[str, Any]]], *, guest_mode: boo
         st.session_state.fota_v3_context_key = context_key
         st.session_state.fota_scanned_imei = ""
         st.session_state.fota_v3_base = ""
+    pending_imei = str(st.session_state.get("fota_v3_pending_imei", "") or "")
+    if pending_imei and model and csc and scanner_device_context("fota_v3") == (model, csc):
+        st.session_state.fota_scanned_imei = pending_imei
+        st.session_state.fota_v3_imei_auto = pending_imei
+        st.session_state.fota_v3_imei_db = pending_imei
+        st.session_state.fota_v3_imei_manual = pending_imei
+        st.session_state.fota_v3_imei_scanned = pending_imei
+        st.session_state.fota_v3_pending_imei = ""
+    pending_base = str(st.session_state.get("fota_v3_pending_base", "") or "")
+    if pending_base and model and csc and scanner_device_context("fota_v3") == (model, csc):
+        st.session_state.fota_v3_base = pending_base
+        st.session_state.fota_v3_base_auto = pending_base
+        st.session_state.fota_v3_base_manual = pending_base
+        st.session_state.fota_v3_base_db = pending_base
+        st.session_state.fota_v3_base_picker_display = pending_base
+        st.session_state.fota_v3_pending_base = ""
     scanned_imei = str(st.session_state.get("fota_scanned_imei", "") or "")
     effective_db_imei = scanned_imei or db_imei
 
@@ -3384,6 +3661,11 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
     if st.session_state.get("imei_v3_context_key") != context_key:
         st.session_state.imei_v3_context_key = context_key
         st.session_state.imei_v3_start_imei = db_imei
+    pending_imei = str(st.session_state.get("imei_v3_pending_imei", "") or "")
+    if pending_imei and model and csc and scanner_device_context("imei_v3") == (model, csc):
+        st.session_state.imei_v3_start_imei = pending_imei
+        st.session_state.imei_v3_start_imei_select = pending_imei
+        st.session_state.imei_v3_pending_imei = ""
 
     st.caption(
         "Use a saved model from decrypted_firmware.db or type the values manually. "
@@ -5276,8 +5558,11 @@ def show_fota_fetch_dialog() -> None:
                     result = current_result
                     break
 
-                if is_no_update_result(current_result) and index < total_candidates:
-                    status_box.write(f"No update on {display_imei}. Trying another known IMEI...")
+                if is_retryable_fota_miss(current_result) and index < total_candidates:
+                    if is_bad_csc_result(current_result):
+                        status_box.write(f"bad_csc on {display_imei}. Trying another known IMEI...")
+                    else:
+                        status_box.write(f"No update on {display_imei}. Trying another known IMEI...")
                     continue
 
                 result = current_result
@@ -5295,7 +5580,7 @@ def show_fota_fetch_dialog() -> None:
                 }
 
             if attempted_results and not any(item.get("kind") in {"update", "dm"} for item in attempted_results):
-                if all(is_no_update_result(item) for item in attempted_results):
+                if all(is_retryable_fota_miss(item) for item in attempted_results):
                     result = {
                         **result,
                         "kind": "uptodate",
@@ -5340,13 +5625,31 @@ def show_fota_fetch_dialog() -> None:
             st.markdown("**Download Command**")
             st.code(result["curl_command"], language="bash")
             st.text_area("curl command", value=result["curl_command"], height=140)
-            action_cols = st.columns(2, gap="medium")
+            action_cols = st.columns(3, gap="medium")
             with action_cols[0]:
                 st.link_button("Open Raw Link", result["download_url"], use_container_width=True)
             with action_cols[1]:
                 if st.button("Open Copy Popup", key="open_copy_popup_from_live_fetch", use_container_width=True):
                     st.session_state.dialog_payload = result
                     st.rerun()
+            with action_cols[2]:
+                if st.button("Fetch Next", key="fetch_next_from_live_fetch", use_container_width=True):
+                    next_base = str(result.get("found_pda", "") or "").strip()
+                    if next_base:
+                        sync_runtime_fota_base_selection(
+                            str(result.get("model", "") or request.get("model", "")),
+                            str(result.get("csc", "") or request.get("csc", "")),
+                            next_base,
+                        )
+                        st.session_state.fota_live_request = {
+                            "model": str(result.get("model", "") or request.get("model", "")),
+                            "csc": str(result.get("csc", "") or request.get("csc", "")),
+                            "imei": str(result.get("imei", "") or request.get("imei", "")),
+                            "base": next_base,
+                        }
+                        st.session_state.fota_live_result = None
+                        st.session_state.fota_live_error = None
+                        st.rerun()
         elif result.get("kind") == "uptodate":
             st.warning(result.get("status", "No update found."))
         else:
@@ -6422,13 +6725,20 @@ def sync_runtime_imei_selection(model: str, csc: str, new_imei: str) -> None:
         st.session_state.imei_input = new_imei
 
     if scanner_device_context("fota_v3") == (clean_model, clean_csc):
-        st.session_state.fota_v3_imei_auto = new_imei
-        st.session_state.fota_v3_imei_db = new_imei
-        st.session_state.fota_v3_imei_manual = new_imei
-        st.session_state.fota_v3_imei_scanned = new_imei
+        st.session_state.fota_scanned_imei = new_imei
+        st.session_state.fota_v3_pending_imei = new_imei
     if scanner_device_context("imei_v3") == (clean_model, clean_csc):
-        st.session_state.imei_v3_start_imei = new_imei
-        st.session_state.imei_v3_start_imei_select = new_imei
+        st.session_state.imei_v3_pending_imei = new_imei
+
+
+def sync_runtime_fota_base_selection(model: str, csc: str, new_base: str) -> None:
+    clean_model = normalize_model_number(model)
+    clean_csc = normalize_csc_code(csc)
+    clean_base = str(new_base or "").strip()
+    if not clean_model or not clean_csc or not clean_base:
+        return
+    if scanner_device_context("fota_v3") == (clean_model, clean_csc):
+        st.session_state.fota_v3_pending_base = clean_base
 
 
 def update_device_imei_by_model_csc(
@@ -6471,6 +6781,15 @@ def is_no_update_result(result: dict[str, Any]) -> bool:
         return True
     status_text = str(result.get("status", "") or "").lower()
     return "260" in status_text or "no update" in status_text
+
+
+def is_bad_csc_result(result: dict[str, Any]) -> bool:
+    status_text = str(result.get("status", "") or "").lower()
+    return "bad_csc" in status_text
+
+
+def is_retryable_fota_miss(result: dict[str, Any]) -> bool:
+    return is_no_update_result(result) or is_bad_csc_result(result)
 
 
 def fota_fallback_imei_candidates(model: str, csc: str, preferred_imei: str) -> list[str]:
@@ -7283,8 +7602,8 @@ def poll_running_task(task: dict[str, Any] | None, interval_seconds: float = 0.8
 
 def main() -> None:
     init_state()
-    sync_activity_feed()
     ensure_workspace_databases()
+    sync_activity_feed()
     sync_legacy_sources()
     ensure_patrol_workers()
     inject_styles()
