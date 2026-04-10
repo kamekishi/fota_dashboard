@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import io
 import json
+import random
 import re
 import requests
 import socket
@@ -19,7 +20,6 @@ from uuid import uuid4
 import xml.etree.ElementTree as ET
 
 import streamlit as st
-import streamlit.components.v1 as components
 from googleapiclient.http import MediaIoBaseDownload
 
 import dc3
@@ -81,6 +81,13 @@ CLOUD_BACKED_FILES = {
     },
 }
 
+VPN_PROVIDER_COUNTRIES = {
+    "Mullvad": ["Sweden", "Japan", "Germany", "Netherlands", "Singapore", "United States"],
+    "NordVPN": ["Canada", "France", "United Kingdom", "Japan", "Australia", "Switzerland"],
+    "Proton VPN": ["Iceland", "Japan", "Singapore", "United States", "Poland", "Romania"],
+    "Surfshark": ["Malaysia", "South Korea", "Germany", "United States", "Indonesia", "Spain"],
+}
+
 
 st.set_page_config(
     page_title="Project Killshot Dashboard",
@@ -111,12 +118,15 @@ def init_state() -> None:
         "fota_completed_task_id": None,
         "imei_completed_task_id": None,
         "fota_live_request": None,
+        "fota_live_state": None,
         "fota_live_result": None,
         "fota_live_error": None,
         "imei_live_request": None,
         "imei_live_result": None,
         "imei_live_error": None,
         "imei_live_state": None,
+        "delta_scan_state": None,
+        "delta_scan_message": None,
         "active_tab": "Dashboard",
         "activity_feed_visible": True,
         "logout_refresh_pending": False,
@@ -129,6 +139,9 @@ def init_state() -> None:
         "decrypt_results": [],
         "decrypt_error": None,
         "decrypt_latest_key": None,
+        "decrypt_task_id": None,
+        "pathfinder_decrypt_task_id": None,
+        "pathfinder_decrypt_error": None,
         "decrypt_lookup_model": "",
         "decrypt_lookup_csc": "",
         "firmware_picker_request": None,
@@ -139,6 +152,11 @@ def init_state() -> None:
         "library_detail_row": None,
         "last_seen_notice_id": 0,
         "pending_notifications": [],
+        "vpn_enabled": False,
+        "vpn_provider": "",
+        "vpn_country": "",
+        "vpn_prev_enabled": False,
+        "vpn_pending_country": "",
         "_legacy_sync_signature": "",
         "requested_tab": None,
     }
@@ -701,6 +719,33 @@ def is_guest_mode() -> bool:
     return current_user_mode() == "guest"
 
 
+def random_vpn_profile(*, exclude: tuple[str, str] | None = None) -> tuple[str, str]:
+    profiles = [
+        (provider, country)
+        for provider, countries in VPN_PROVIDER_COUNTRIES.items()
+        for country in countries
+        if not exclude or (provider, country) != exclude
+    ]
+    if not profiles:
+        if exclude:
+            return exclude
+        first_provider = next(iter(VPN_PROVIDER_COUNTRIES))
+        return first_provider, VPN_PROVIDER_COUNTRIES[first_provider][0]
+    return random.choice(profiles)
+
+
+def queue_vpn_profile(provider: str, country: str, *, notify: bool = True) -> None:
+    clean_provider = str(provider or "").strip()
+    clean_country = str(country or "").strip()
+    if not clean_provider or not clean_country:
+        return
+    st.session_state.vpn_provider = clean_provider
+    st.session_state.vpn_country = clean_country
+    st.session_state.vpn_pending_country = clean_country
+    if notify:
+        queue_local_notification(f"{clean_country} • {clean_provider}", icon="🌐")
+
+
 def increment_imei(imei: str, step: int = 1) -> str:
     if not imei.isdigit():
         return imei
@@ -734,6 +779,7 @@ def create_task(task_type: str, payload: dict[str, Any]) -> str:
             "result": None,
             "results": [],
             "error": None,
+            "cancel_requested": False,
             "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
     return task_id
@@ -751,6 +797,35 @@ def get_task(task_id: str | None) -> dict[str, Any] | None:
     with TASK_LOCK:
         task = TASKS.get(task_id)
         return dict(task) if task else None
+
+
+def request_task_cancel(task_id: str | None, *, message: str = "Stopping...") -> None:
+    if not task_id:
+        return
+    with TASK_LOCK:
+        if task_id in TASKS:
+            TASKS[task_id]["cancel_requested"] = True
+            if TASKS[task_id].get("status") == "running":
+                TASKS[task_id]["message"] = message
+
+
+def task_cancel_requested(task_id: str | None) -> bool:
+    if not task_id:
+        return False
+    with TASK_LOCK:
+        task = TASKS.get(task_id)
+        return bool(task and task.get("cancel_requested"))
+
+
+def stop_task(task_id: str | None, *, message: str = "Stopped by user.") -> None:
+    if not task_id:
+        return
+    update_task(
+        task_id,
+        status="stopped",
+        message=message,
+        finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
 
 
 def readable_size(size_in_bytes: Any) -> str:
@@ -1576,7 +1651,11 @@ def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
                 push_activity("error", f"Decryption failed for {effective_model} / {effective_csc}: {exc}")
 
     if st.session_state.get("decrypt_error"):
-        st.error(str(st.session_state.get("decrypt_error")))
+        decrypt_message = str(st.session_state.get("decrypt_error"))
+        if "stopped" in decrypt_message.lower():
+            st.warning(decrypt_message)
+        else:
+            st.error(decrypt_message)
 
     results = st.session_state.get("decrypt_results", [])
     if results:
@@ -1808,13 +1887,18 @@ def latest_decrypted_versions(model: str, csc: str, limit: int = 10) -> list[str
 
 
 def dismiss_firmware_picker_dialog() -> None:
+    request = st.session_state.get("firmware_picker_request") or {}
+    if request.get("task_id"):
+        request_task_cancel(str(request.get("task_id")), message="Stopping decryption...")
     st.session_state.firmware_picker_request = None
 
 
 def dismiss_delta_scan_dialog() -> None:
     st.session_state.delta_scan_request = None
+    st.session_state.delta_scan_state = None
     st.session_state.delta_scan_result = None
     st.session_state.delta_scan_error = None
+    st.session_state.delta_scan_message = None
 
 
 def dismiss_download_dialog() -> None:
@@ -1823,6 +1907,7 @@ def dismiss_download_dialog() -> None:
 
 def dismiss_fota_fetch_dialog() -> None:
     st.session_state.fota_live_request = None
+    st.session_state.fota_live_state = None
     st.session_state.fota_live_result = None
     st.session_state.fota_live_error = None
 
@@ -1832,6 +1917,166 @@ def dismiss_imei_scan_dialog() -> None:
     st.session_state.imei_live_result = None
     st.session_state.imei_live_error = None
     st.session_state.imei_live_state = None
+
+
+class DecryptionStopped(Exception):
+    pass
+
+
+def init_fota_live_state(request: dict[str, Any]) -> dict[str, Any]:
+    candidates = fota_fallback_imei_candidates(
+        str(request.get("model", "") or ""),
+        str(request.get("csc", "") or ""),
+        str(request.get("imei", "") or ""),
+    )
+    return {
+        "model": str(request.get("model", "") or ""),
+        "csc": str(request.get("csc", "") or ""),
+        "base": str(request.get("base", "") or ""),
+        "candidates": candidates,
+        "index": 0,
+        "attempted_results": [],
+        "status": "Checking local cache and preparing the Samsung OTA request...",
+    }
+
+
+def finalize_fota_live_result(result: dict[str, Any]) -> None:
+    st.session_state.fota_live_result = result
+    st.session_state.last_result = result
+    st.session_state.fota_live_state = None
+
+
+def stop_fota_live_process() -> None:
+    request = st.session_state.get("fota_live_request") or {}
+    state = st.session_state.get("fota_live_state") or {}
+    processed = int(state.get("index", 0) or 0)
+    total = len(state.get("candidates", []) or [])
+    finalize_fota_live_result(
+        {
+            "kind": "stopped",
+            "status": f"OTA fetch stopped by user after {processed} of {max(total, 1)} IMEI attempts.",
+            "model": str(request.get("model", "") or state.get("model", "")),
+            "csc": str(request.get("csc", "") or state.get("csc", "")),
+            "imei": str(request.get("imei", "") or ""),
+            "base": str(request.get("base", "") or state.get("base", "")),
+            "found_pda": "",
+        }
+    )
+
+
+def init_delta_scan_state(request: dict[str, Any]) -> dict[str, Any]:
+    versions = list(request.get("versions", []) or [])
+    return {
+        "model": str(request.get("model", "") or ""),
+        "csc": str(request.get("csc", "") or ""),
+        "imei": str(request.get("imei", "") or ""),
+        "versions": versions,
+        "index": 0,
+        "rows": [],
+        "status": "Preparing OTA delta scan...",
+    }
+
+
+def finalize_delta_scan(rows: list[dict[str, Any]], *, message: str | None = None) -> None:
+    st.session_state.delta_scan_result = rows
+    st.session_state.delta_scan_state = None
+    st.session_state.delta_scan_message = message
+
+
+def start_decryption_task(
+    model: str,
+    csc: str,
+    *,
+    persist: bool = True,
+    activity_message: str | None = None,
+) -> str:
+    clean_model = normalize_model_number(model)
+    clean_csc = normalize_csc_code(csc)
+    task_id = create_task(
+        "decryption",
+        {
+            "model": clean_model,
+            "csc": clean_csc,
+            "persist": persist,
+        },
+    )
+
+    def worker() -> None:
+        def progress_callback(stage: str, completed: int, total: int, label: str) -> None:
+            if task_cancel_requested(task_id):
+                raise DecryptionStopped()
+            update_task(
+                task_id,
+                stage=stage,
+                completed=completed,
+                total=total,
+                progress=min(max(completed / max(total, 1), 0.0), 1.0),
+                progress_label=label,
+                message=label,
+            )
+
+        try:
+            if activity_message:
+                queue_activity("info", activity_message)
+            update_task(task_id, message="Preparing server MD5 list...", stage="prepare", progress=0.0)
+            if task_cancel_requested(task_id):
+                raise DecryptionStopped()
+            result = decrypt_device_live(clean_model, clean_csc, persist=persist, progress_callback=progress_callback)
+            if task_cancel_requested(task_id):
+                raise DecryptionStopped()
+            update_task(
+                task_id,
+                status="completed",
+                message="Decryption complete",
+                progress=1.0,
+                result=result,
+                finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            queue_activity("info", decryption_completion_message(clean_model, clean_csc, result))
+        except DecryptionStopped:
+            stop_task(task_id, message="Decryption stopped by user.")
+            queue_activity("warn", f"Decryption was stopped for {clean_model} ({clean_csc}).")
+        except Exception as exc:
+            update_task(
+                task_id,
+                status="failed",
+                message=str(exc),
+                error=str(exc),
+                progress=1.0,
+                finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            queue_activity("error", f"Decryption failed for {clean_model} / {clean_csc}: {exc}")
+
+    threading.Thread(target=worker, daemon=True).start()
+    return task_id
+
+
+def decryption_task_status_label(task: dict[str, Any]) -> str:
+    stage = str(task.get("stage", "") or "")
+    label = str(task.get("progress_label", "") or task.get("message", "") or "")
+    stage_map = {
+        "prepare": "Preparing server MD5 list",
+        "decrypt": "Decrypting firmware map",
+        "finalize": "Finalizing database records",
+    }
+    display_label, _ = parse_decryption_progress_label(label)
+    return f"{stage_map.get(stage, stage.title() or 'Working')}: {display_label}".strip(": ")
+
+
+def render_decryption_task_progress(task: dict[str, Any], *, stop_key: str, stop_label: str = "Stop") -> bool:
+    status_box = st.status(decryption_task_status_label(task), expanded=True)
+    progress = st.progress(min(max(float(task.get("progress", 0.0) or 0.0), 0.0), 1.0))
+    st.caption(f"{min(max(float(task.get('progress', 0.0) or 0.0), 0.0), 1.0) * 100:.1f}%")
+    stop_clicked = st.button(stop_label, key=stop_key, use_container_width=True)
+    if task.get("status") == "running":
+        status_box.update(label=decryption_task_status_label(task), state="running")
+    elif task.get("status") == "completed":
+        status_box.update(label="Decryption complete", state="complete")
+    elif task.get("status") == "stopped":
+        status_box.update(label=str(task.get("message", "Decryption stopped")), state="error")
+    elif task.get("status") == "failed":
+        status_box.update(label=str(task.get("message", "Decryption failed")), state="error")
+    return stop_clicked
 
 
 @st.dialog("Use Decryptor", width="medium", on_dismiss=dismiss_firmware_picker_dialog)
@@ -1902,38 +2147,63 @@ def show_delta_scan_dialog() -> None:
         st.info("No delta scan is active.")
         return
 
-    if st.session_state.get("delta_scan_result") is None and st.session_state.get("delta_scan_error") is None:
-        status_box = st.status("Running OTA delta scan...", expanded=True)
-        progress = st.progress(0)
-        rows: list[dict[str, Any]] = []
-        versions = list(request.get("versions", []))
-        model = request["model"]
-        csc = request["csc"]
-        imei = request["imei"]
-        for index, base_version in enumerate(versions, start=1):
-            progress.progress(int((index - 1) / max(len(versions), 1) * 100))
-            status_box.write(f"Checking `{base_version}` ({index}/{len(versions)})")
-            result = lookup_download_link(model, csc, imei, base_version, use_cache=False)
-            rows.append(
-                {
-                    "timestamp": result.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-                    "device_model": model,
-                    "csc": csc,
-                    "request_base_version": base_version,
-                    "found_pda": result.get("found_pda", ""),
-                    "security_patch_date": format_security_patch_value(result.get("security") or infer_security_patch_from_version(result.get("found_pda", ""))),
-                    "dm_url": result.get("download_url", "") if result.get("kind") == "dm" else "",
-                    "fota_url": result.get("download_url", "") if result.get("kind") != "dm" else "",
-                    "kind": result.get("kind", ""),
-                }
-            )
-        st.session_state.delta_scan_result = rows
-        progress.progress(100)
-        status_box.update(label="Delta scan complete", state="complete")
+    if (
+        st.session_state.get("delta_scan_result") is None
+        and st.session_state.get("delta_scan_error") is None
+        and st.session_state.get("delta_scan_state") is None
+    ):
+        st.session_state.delta_scan_state = init_delta_scan_state(request)
+        st.session_state.delta_scan_message = None
+
+    state = st.session_state.get("delta_scan_state")
+    if state and st.session_state.get("delta_scan_result") is None and st.session_state.get("delta_scan_error") is None:
+        versions = list(state.get("versions", []))
+        index = int(state.get("index", 0) or 0)
+        status_box = st.status(str(state.get("status", "Running OTA delta scan...")), expanded=True)
+        progress = st.progress(min(max(index / max(len(versions), 1), 0.0), 1.0))
+        if st.button("Stop", key="stop_delta_scan_dialog", use_container_width=True):
+            finalize_delta_scan(list(state.get("rows", [])), message="Delta scan stopped by user.")
+            st.rerun()
+
+        if index < len(versions):
+            base_version = str(versions[index])
+            state["status"] = f"Checking `{base_version}` ({index + 1}/{len(versions)})"
+            st.session_state.delta_scan_state = state
+            status_box.update(label=state["status"], state="running")
+            try:
+                result = lookup_download_link(state["model"], state["csc"], state["imei"], base_version, use_cache=False)
+                rows = list(state.get("rows", []))
+                rows.append(
+                    {
+                        "timestamp": result.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                        "device_model": state["model"],
+                        "csc": state["csc"],
+                        "request_base_version": base_version,
+                        "found_pda": result.get("found_pda", ""),
+                        "security_patch_date": format_security_patch_value(
+                            result.get("security") or infer_security_patch_from_version(result.get("found_pda", ""))
+                        ),
+                        "dm_url": result.get("download_url", "") if result.get("kind") == "dm" else "",
+                        "fota_url": result.get("download_url", "") if result.get("kind") != "dm" else "",
+                        "kind": result.get("kind", ""),
+                    }
+                )
+                state["rows"] = rows
+                state["index"] = index + 1
+                st.session_state.delta_scan_state = state
+                if state["index"] >= len(versions):
+                    finalize_delta_scan(rows)
+                time.sleep(0.15)
+                st.rerun()
+            except Exception as exc:
+                st.session_state.delta_scan_error = str(exc)
+                st.session_state.delta_scan_state = None
 
     if st.session_state.get("delta_scan_error"):
         st.error(str(st.session_state.get("delta_scan_error")))
     else:
+        if st.session_state.get("delta_scan_message"):
+            st.info(str(st.session_state.get("delta_scan_message")))
         rows = st.session_state.get("delta_scan_result", [])
         if not rows:
             st.info("No delta scan results are available.")
@@ -1961,8 +2231,10 @@ def show_delta_scan_dialog() -> None:
 
     if st.button("Close", key="delta_scan_close", use_container_width=True):
         st.session_state.delta_scan_request = None
+        st.session_state.delta_scan_state = None
         st.session_state.delta_scan_result = None
         st.session_state.delta_scan_error = None
+        st.session_state.delta_scan_message = None
         st.rerun()
 
 
@@ -2289,6 +2561,9 @@ def render_pathfinder_tab() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+    if st.session_state.get("pathfinder_decrypt_error"):
+        st.warning(str(st.session_state.get("pathfinder_decrypt_error")))
 
     if model:
         st.markdown("<div class='section-spacer-sm'></div>", unsafe_allow_html=True)
@@ -3352,7 +3627,10 @@ def finalize_imei_live_scan(
 ) -> None:
     message = ""
     if terminated:
-        message = f"The process has been terminated prematurely due to Error {termination_reason}."
+        if termination_reason.strip().lower() == "stopped by user.":
+            message = "IMEI scan stopped by user."
+        else:
+            message = f"The process has been terminated prematurely due to Error {termination_reason}."
     elif state["stop_after_index"] < state["attempts"]:
         fallback_reason = termination_reason or "Auth Didn't Maked!"
         message = f"Scan ended after the extra IMEIs allowed following Error {fallback_reason}."
@@ -3376,7 +3654,10 @@ def finalize_imei_live_scan(
     st.session_state.imei_live_state = None
 
     if terminated:
-        push_activity("warn", f"IMEI scan for {state['model']} was terminated due to {termination_reason}.")
+        if termination_reason.strip().lower() == "stopped by user.":
+            push_activity("warn", f"IMEI scan for {state['model']} was stopped by user.")
+        else:
+            push_activity("warn", f"IMEI scan for {state['model']} was terminated due to {termination_reason}.")
     else:
         push_activity(
             "info",
@@ -4037,6 +4318,9 @@ def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
     if effective_model:
         ensure_known_device(effective_model, effective_csc)
 
+    if st.session_state.get("decrypt_task_id"):
+        st.session_state.decrypt_task_id = None
+
     if st.button("Start Decryption", key="start_decryption_v4", use_container_width=True):
         if not effective_model or not effective_csc:
             st.error("Model and CSC are required.")
@@ -4348,6 +4632,75 @@ def render_terminal_tab(snapshot_text: str) -> None:
         """,
         unsafe_allow_html=True,
     )
+    st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
+    st.markdown(
+        """
+        <section class="glass-card table-card">
+            <div class="section-kicker">VPN Routing</div>
+            <div class="progress-caption">This build stores the selected VPN route profile in-app. A system VPN backend can be wired in later.</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+    use_vpn = st.toggle("Use VPN", key="vpn_enabled")
+    previous_enabled = bool(st.session_state.get("vpn_prev_enabled", False))
+    if use_vpn and not previous_enabled:
+        provider, country = random_vpn_profile()
+        queue_vpn_profile(provider, country, notify=True)
+    elif not use_vpn and previous_enabled:
+        st.session_state.vpn_provider = ""
+        st.session_state.vpn_country = ""
+        st.session_state.vpn_pending_country = ""
+    st.session_state.vpn_prev_enabled = use_vpn
+
+    if use_vpn:
+        current_provider = str(st.session_state.get("vpn_provider", "") or "")
+        current_country = str(st.session_state.get("vpn_country", "") or "")
+        if not current_provider or not current_country:
+            provider, country = random_vpn_profile()
+            queue_vpn_profile(provider, country, notify=False)
+            current_provider = provider
+            current_country = country
+
+        pending_country = str(st.session_state.get("vpn_pending_country", "") or "")
+        country_options = list(VPN_PROVIDER_COUNTRIES.get(current_provider, []))
+        if not country_options:
+            country_options = [current_country] if current_country else []
+        if current_country and current_country not in country_options:
+            country_options = [current_country] + country_options
+        if pending_country and pending_country in country_options:
+            st.session_state.vpn_country_picker = pending_country
+            st.session_state.vpn_pending_country = ""
+        elif current_country and "vpn_country_picker" not in st.session_state:
+            st.session_state.vpn_country_picker = current_country
+
+        st.markdown(
+            f"""
+            <section class="glass-card table-card">
+                <div class="section-kicker">Current VPN</div>
+                <div class="dashboard-big-number small">{html.escape(current_country)} • {html.escape(current_provider)}</div>
+            </section>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        action_cols = st.columns([1, 1], gap="medium")
+        with action_cols[0]:
+            if st.button("Next VPN", key="vpn_next", use_container_width=True):
+                next_provider, next_country = random_vpn_profile(exclude=(current_provider, current_country))
+                queue_vpn_profile(next_provider, next_country, notify=True)
+                st.rerun()
+        with action_cols[1]:
+            selected_country = st.selectbox(
+                "Change Country",
+                country_options,
+                index=country_options.index(current_country) if current_country in country_options else 0,
+                key="vpn_country_picker",
+            )
+            if st.button("Apply Country", key="vpn_change_country", use_container_width=True):
+                if selected_country != current_country:
+                    queue_vpn_profile(current_provider, selected_country, notify=True)
+                    st.rerun()
     st.markdown("<div class='section-spacer'></div>", unsafe_allow_html=True)
     st.toggle("Enable experimental feedback routing", value=False, disabled=True)
     st.text_area(
@@ -5514,37 +5867,41 @@ def show_fota_fetch_dialog() -> None:
         st.info("No active FOTA fetch request.")
         return
 
-    if st.session_state.get("fota_live_result") is None and st.session_state.get("fota_live_error") is None:
-        status_box = st.status("Starting live fetch...", expanded=True)
-        progress = st.progress(0)
-        candidates = fota_fallback_imei_candidates(
-            request["model"],
-            request["csc"],
-            request["imei"],
-        )
-        total_candidates = max(len(candidates), 1)
-        status_box.write("Checking local cache and preparing the Samsung OTA request...")
-        progress.progress(10)
-        try:
-            result: dict[str, Any] | None = None
-            attempted_results: list[dict[str, Any]] = []
+    if (
+        st.session_state.get("fota_live_result") is None
+        and st.session_state.get("fota_live_error") is None
+        and st.session_state.get("fota_live_state") is None
+    ):
+        st.session_state.fota_live_state = init_fota_live_state(request)
 
-            for index, candidate_imei in enumerate(candidates, start=1):
-                display_imei = candidate_imei
-                if candidate_imei != str(request.get("imei", "") or ""):
-                    update_device_imei_by_model_csc(
-                        request["model"],
-                        request["csc"],
-                        candidate_imei,
-                        "FOTA Scanner",
-                        log_activity=False,
-                        report_invalid=False,
-                    )
-                    request["imei"] = candidate_imei
-                    st.session_state.fota_live_request = request
+    state = st.session_state.get("fota_live_state")
+    if state and st.session_state.get("fota_live_result") is None and st.session_state.get("fota_live_error") is None:
+        total_candidates = max(len(state.get("candidates", [])), 1)
+        current_index = int(state.get("index", 0) or 0)
+        status_box = st.status(str(state.get("status", "Starting live fetch...")), expanded=True)
+        progress = st.progress(min(max(current_index / total_candidates, 0.0), 1.0))
+        if st.button("Stop", key="stop_fota_live_dialog", use_container_width=True):
+            stop_fota_live_process()
+            st.rerun()
 
-                status_box.write(f"Running live FOTA fetch with {display_imei} ({index}/{total_candidates})...")
-                progress.progress(min(18 + int((index - 1) / total_candidates * 58), 78))
+        if current_index < len(state.get("candidates", [])):
+            candidate_imei = str(state["candidates"][current_index])
+            if candidate_imei != str(request.get("imei", "") or ""):
+                update_device_imei_by_model_csc(
+                    request["model"],
+                    request["csc"],
+                    candidate_imei,
+                    "FOTA Scanner",
+                    log_activity=False,
+                    report_invalid=False,
+                )
+                request["imei"] = candidate_imei
+                st.session_state.fota_live_request = request
+
+            state["status"] = f"Running live FOTA fetch with {candidate_imei} ({current_index + 1}/{total_candidates})..."
+            st.session_state.fota_live_state = state
+            status_box.update(label=state["status"], state="running")
+            try:
                 current_result = lookup_download_link(
                     request["model"],
                     request["csc"],
@@ -5552,55 +5909,34 @@ def show_fota_fetch_dialog() -> None:
                     request.get("base"),
                     use_cache=False,
                 )
+                attempted_results = list(state.get("attempted_results", []))
                 attempted_results.append(current_result)
+                state["attempted_results"] = attempted_results
 
                 if current_result.get("kind") in {"update", "dm"}:
-                    result = current_result
-                    break
-
-                if is_retryable_fota_miss(current_result) and index < total_candidates:
+                    finalize_fota_live_result(current_result)
+                elif is_retryable_fota_miss(current_result) and (current_index + 1) < len(state.get("candidates", [])):
+                    state["index"] = current_index + 1
                     if is_bad_csc_result(current_result):
-                        status_box.write(f"bad_csc on {display_imei}. Trying another known IMEI...")
+                        state["status"] = f"bad_csc on {candidate_imei}. Trying another known IMEI..."
                     else:
-                        status_box.write(f"No update on {display_imei}. Trying another known IMEI...")
-                    continue
-
-                result = current_result
-                break
-
-            if result is None:
-                result = {
-                    "kind": "uptodate",
-                    "status": "All IMEIs has failed to fetch OTA for this device. Please scan more IMEIs.",
-                    "model": request["model"],
-                    "csc": request["csc"],
-                    "imei": request["imei"],
-                    "base": request.get("base", ""),
-                    "found_pda": request.get("base", ""),
-                }
-
-            if attempted_results and not any(item.get("kind") in {"update", "dm"} for item in attempted_results):
-                if all(is_retryable_fota_miss(item) for item in attempted_results):
-                    result = {
-                        **result,
-                        "kind": "uptodate",
-                        "status": "All IMEIs has failed to fetch OTA for this device. Please scan more IMEIs.",
-                    }
-
-            progress.progress(88)
-            st.session_state.fota_live_result = result
-            st.session_state.last_result = result
-            progress.progress(100)
-            if result.get("kind") in {"update", "dm"}:
-                status_box.update(label="Fetch complete", state="complete")
-            elif result.get("kind") == "uptodate":
-                status_box.update(label="No OTA fetched", state="complete")
-            else:
-                status_box.update(label="Fetch failed", state="error")
-        except Exception as exc:
-            st.session_state.fota_live_error = str(exc)
-            progress.progress(100)
-            status_box.update(label="Fetch failed", state="error")
+                        state["status"] = f"No update on {candidate_imei}. Trying another known IMEI..."
+                    st.session_state.fota_live_state = state
+                else:
+                    result = current_result
+                    if attempted_results and not any(item.get("kind") in {"update", "dm"} for item in attempted_results):
+                        if all(is_retryable_fota_miss(item) for item in attempted_results):
+                            result = {
+                                **result,
+                                "kind": "uptodate",
+                                "status": "All IMEIs has failed to fetch OTA for this device. Please scan more IMEIs.",
+                            }
+                    finalize_fota_live_result(result)
+            except Exception as exc:
+                st.session_state.fota_live_error = str(exc)
+                st.session_state.fota_live_state = None
+            time.sleep(0.15)
+            st.rerun()
 
     result = st.session_state.get("fota_live_result")
     error = st.session_state.get("fota_live_error")
@@ -5652,6 +5988,8 @@ def show_fota_fetch_dialog() -> None:
                         st.rerun()
         elif result.get("kind") == "uptodate":
             st.warning(result.get("status", "No update found."))
+        elif result.get("kind") == "stopped":
+            st.warning(result.get("status", "Lookup stopped by user."))
         else:
             st.error(result.get("status", "Lookup failed."))
 
@@ -5721,82 +6059,93 @@ def show_imei_scan_dialog() -> None:
 
     if state and result is None and error is None:
         render_scan_shell(state)
-
-        while state["index"] < state["stop_after_index"] and not state["paused_for_auth"]:
-            current_imei = state["current_imei"]
-            current_attempt = state["index"] + 1
-            state["status"] = f"Scanning {current_imei} ({current_attempt}/{state['attempts']})"
-            state["status_outcome"] = ""
-            render_scan_shell(state)
-
-            try:
-                response = lookup_download_link(
-                    state["model"],
-                    state["csc"],
-                    current_imei,
-                    state["base"],
-                    use_cache=False,
+        if not state.get("paused_for_auth"):
+            if st.button("Stop", key="stop_imei_live_dialog", use_container_width=True):
+                finalize_imei_live_scan(
+                    state,
+                    terminated=True,
+                    termination_reason="Stopped by user.",
                 )
-            except Exception as exc:
-                response = {
-                    "kind": "error",
-                    "status": str(exc),
-                    "source": "remote",
-                    "found_pda": "",
-                }
+                st.rerun()
 
-            state["results"].append(
-                {
-                    "attempt": str(current_attempt),
-                    "imei": current_imei,
-                    "status": format_imei_status_text(response.get("status", response.get("kind", "Unknown"))),
-                    "source": response.get("source", "remote"),
-                    "firmware": response.get("found_pda", ""),
-                    "kind": response.get("kind", ""),
-                }
-            )
+            if state["index"] < state["stop_after_index"]:
+                current_imei = state["current_imei"]
+                current_attempt = state["index"] + 1
+                state["status"] = f"Scanning {current_imei} ({current_attempt}/{state['attempts']})"
+                state["status_outcome"] = ""
+                st.session_state.imei_live_state = state
+                render_scan_shell(state)
 
-            outcome = classify_imei_result(response)
-            state["status_outcome"] = outcome
+                try:
+                    response = lookup_download_link(
+                        state["model"],
+                        state["csc"],
+                        current_imei,
+                        state["base"],
+                        use_cache=False,
+                    )
+                except Exception as exc:
+                    response = {
+                        "kind": "error",
+                        "status": str(exc),
+                        "source": "remote",
+                        "found_pda": "",
+                    }
 
-            if outcome == "HIT":
-                state["hit_count"] += 1
-                if state["last_hit"] is None:
-                    state["last_hit"] = response
-                state["hits"].append(
+                state["results"].append(
                     {
+                        "attempt": str(current_attempt),
                         "imei": current_imei,
-                        "firmware": response.get("found_pda", "Unknown") or "Unknown",
+                        "status": format_imei_status_text(response.get("status", response.get("kind", "Unknown"))),
+                        "source": response.get("source", "remote"),
+                        "firmware": response.get("found_pda", ""),
+                        "kind": response.get("kind", ""),
                     }
                 )
-            elif outcome == "VALID":
-                state["valid_count"] += 1
-            else:
-                state["error_count"] += 1
 
-            state["index"] += 1
-            state["current_imei"] = increment_imei(current_imei, state["step"])
-            render_scan_shell(state)
+                outcome = classify_imei_result(response)
+                state["status_outcome"] = outcome
 
-            if is_auth_failed_result(response) and not state.get("force_continue", False):
-                state["paused_for_auth"] = True
-                state["auth_error_label"] = format_imei_status_text(response.get("status", "auth_failed"))
-                state["auth_error_raw"] = str(response.get("status", "auth_failed"))
-                push_activity(
-                    "error",
-                    f"A user has encountered Auth Maked Failed during an IMEI Scanner for {state['model']}.",
-                )
+                if outcome == "HIT":
+                    state["hit_count"] += 1
+                    if state["last_hit"] is None:
+                        state["last_hit"] = response
+                    state["hits"].append(
+                        {
+                            "imei": current_imei,
+                            "firmware": response.get("found_pda", "Unknown") or "Unknown",
+                        }
+                    )
+                elif outcome == "VALID":
+                    state["valid_count"] += 1
+                else:
+                    state["error_count"] += 1
+
+                state["index"] += 1
+                state["current_imei"] = increment_imei(current_imei, state["step"])
+
+                if is_auth_failed_result(response) and not state.get("force_continue", False):
+                    state["paused_for_auth"] = True
+                    state["auth_error_label"] = format_imei_status_text(response.get("status", "auth_failed"))
+                    state["auth_error_raw"] = str(response.get("status", "auth_failed"))
+                    push_activity(
+                        "error",
+                        f"A user has encountered Auth Maked Failed during an IMEI Scanner for {state['model']}.",
+                    )
+                    st.session_state.imei_live_state = state
+                    st.rerun()
+
+                if state["index"] >= state["stop_after_index"]:
+                    finalize_imei_live_scan(
+                        state,
+                        terminated=False,
+                        termination_reason=state.get("auth_error_label", ""),
+                    )
+                    st.rerun()
+
                 st.session_state.imei_live_state = state
-                break
-
-        if state["index"] >= state["stop_after_index"] and not state["paused_for_auth"]:
-            finalize_imei_live_scan(
-                state,
-                terminated=False,
-                termination_reason=state.get("auth_error_label", ""),
-            )
-            result = st.session_state.get("imei_live_result")
-            state = None
+                time.sleep(0.15)
+                st.rerun()
 
     if error:
         st.error(error)
@@ -7522,45 +7871,7 @@ def refresh_snapshot(log_message: bool) -> None:
 
 
 def render_layout_bridge() -> None:
-    components.html(
-        """
-        <script>
-        const doc = window.parent.document;
-        const root = doc.documentElement;
-
-        function updateDockLayout() {
-          const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-          let sidebarWidth = 0;
-          if (sidebar) {
-            const rect = sidebar.getBoundingClientRect();
-            if (rect.width > 40 && rect.right > 0) {
-              sidebarWidth = rect.width;
-            }
-          }
-          const viewportWidth = window.parent.innerWidth || doc.documentElement.clientWidth || 1280;
-          const contentMax = 1440;
-          const gutter = 72;
-          const contentWidth = Math.min(contentMax, Math.max(360, viewportWidth - sidebarWidth - gutter));
-          const contentLeft = Math.max(16, sidebarWidth + ((viewportWidth - sidebarWidth - contentWidth) / 2));
-          root.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
-          root.style.setProperty('--content-width', `${contentWidth}px`);
-          root.style.setProperty('--content-left', `${contentLeft}px`);
-        }
-
-        updateDockLayout();
-        const bodyObserver = new MutationObserver(updateDockLayout);
-        bodyObserver.observe(doc.body, { childList: true, subtree: true, attributes: true });
-        if (window.parent.ResizeObserver) {
-          const resizeObserver = new window.parent.ResizeObserver(updateDockLayout);
-          resizeObserver.observe(doc.body);
-          const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-          if (sidebar) resizeObserver.observe(sidebar);
-        }
-        window.parent.addEventListener('resize', updateDockLayout);
-        </script>
-        """,
-        height=0,
-    )
+    return None
 
 
 def render_activity_feed() -> None:
@@ -7612,15 +7923,7 @@ def main() -> None:
         render_login_page()
         if st.session_state.get("logout_refresh_pending"):
             st.session_state.logout_refresh_pending = False
-            components.html(
-                """
-                <script>
-                const target = window.parent || window;
-                target.location.reload();
-                </script>
-                """,
-                height=0,
-            )
+            st.rerun()
         return
 
     surface_new_notifications()
@@ -7732,7 +8035,6 @@ def main() -> None:
     if st.session_state.dialog_payload:
         show_download_dialog(st.session_state.dialog_payload)
 
-    render_layout_bridge()
     render_activity_feed()
 
 
