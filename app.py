@@ -1593,23 +1593,43 @@ def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
 
     picker_cols = st.columns([1.4, 1.1], gap="medium")
     with picker_cols[0]:
-        selected_model = st.selectbox(
-            "Known Model",
-            [""] + model_options,
-            format_func=lambda value: "Select from database" if not value else value,
-            key="decrypt_known_model",
+        model_mode = st.radio(
+            "Device Model Mode",
+            ["Auto", "Manual"],
+            horizontal=True,
+            key="decrypt_model_mode",
         )
-        manual_model = st.text_input("Manual Model Number", key="decrypt_model_input")
+        if model_mode == "Auto":
+            selected_model = st.selectbox(
+                "Known Model",
+                [""] + model_options,
+                format_func=lambda value: "Select from database" if not value else value,
+                key="decrypt_known_model",
+            )
+            manual_model = ""
+        else:
+            selected_model = ""
+            manual_model = st.text_input("Manual Model Number", key="decrypt_model_input")
     with picker_cols[1]:
         effective_model = normalize_model_number(manual_model or selected_model)
         csc_options = csc_options_for_model(effective_model)
-        selected_csc = st.selectbox(
-            "Known CSC",
-            [""] + csc_options,
-            format_func=lambda value: "Select CSC" if not value else value,
-            key="decrypt_known_csc",
+        csc_mode = st.radio(
+            "CSC Mode",
+            ["Auto", "Manual"],
+            horizontal=True,
+            key="decrypt_csc_mode",
         )
-        manual_csc = st.text_input("Manual CSC", key="decrypt_csc_input")
+        if csc_mode == "Auto":
+            selected_csc = st.selectbox(
+                "Known CSC",
+                [""] + csc_options,
+                format_func=lambda value: "Select CSC" if not value else value,
+                key="decrypt_known_csc",
+            )
+            manual_csc = ""
+        else:
+            selected_csc = ""
+            manual_csc = st.text_input("Manual CSC", key="decrypt_csc_input")
 
     effective_csc = normalize_csc_code(manual_csc or selected_csc)
     if effective_model:
@@ -2253,33 +2273,37 @@ def scanner_device_input(prefix: str) -> tuple[str, str, str, str]:
     base = ""
     left, right = st.columns(2, gap="medium")
     with left:
-        selected_model = st.selectbox(
-            "Device Model (Database)",
-            [""] + model_options,
-            format_func=lambda value: "Select a model" if not value else value,
-            key=f"{prefix}_selected_model",
-            disabled=not use_database_mode,
-        )
-        manual_model = st.text_input(
-            "Device Model (Manual)",
-            key=f"{prefix}_manual_model",
-            disabled=use_database_mode,
-        )
+        if use_database_mode:
+            selected_model = st.selectbox(
+                "Device Model (Database)",
+                [""] + model_options,
+                format_func=lambda value: "Select a model" if not value else value,
+                key=f"{prefix}_selected_model",
+            )
+            manual_model = ""
+        else:
+            selected_model = ""
+            manual_model = st.text_input(
+                "Device Model (Manual)",
+                key=f"{prefix}_manual_model",
+            )
     resolved_model = normalize_model_number(selected_model if use_database_mode else manual_model)
     with right:
         csc_options = csc_options_for_model(resolved_model)
-        selected_csc = st.selectbox(
-            "CSC (Database)",
-            [""] + csc_options,
-            format_func=lambda value: "Select a CSC" if not value else value,
-            key=f"{prefix}_selected_csc",
-            disabled=not use_database_mode,
-        )
-        manual_csc = st.text_input(
-            "CSC (Manual)",
-            key=f"{prefix}_manual_csc",
-            disabled=use_database_mode,
-        )
+        if use_database_mode:
+            selected_csc = st.selectbox(
+                "CSC (Database)",
+                [""] + csc_options,
+                format_func=lambda value: "Select a CSC" if not value else value,
+                key=f"{prefix}_selected_csc",
+            )
+            manual_csc = ""
+        else:
+            selected_csc = ""
+            manual_csc = st.text_input(
+                "CSC (Manual)",
+                key=f"{prefix}_manual_csc",
+            )
     model = resolved_model
     csc = normalize_csc_code(selected_csc if use_database_mode else manual_csc)
     if model:
@@ -2387,7 +2411,7 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
         start_imei = st.text_input("Start IMEI", value=db_imei, key="scan_imei")
     with right:
         step = st.number_input("Thread [Recommended: 4]", min_value=1, max_value=999, value=4, step=1, key="scan_step")
-    attempts = st.number_input("No. of IMEI", min_value=1, max_value=50, value=50, step=1, key="scan_attempts")
+    attempts = st.number_input("No. of IMEI", min_value=1, value=50, step=1, key="scan_attempts")
 
     if st.button("Start IMEI Scan", key="start_imei_scan_v2", use_container_width=True):
         if not model or not csc or not base or not start_imei:
@@ -4014,7 +4038,7 @@ def render_imei_scanner_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
             start_imei = st.text_input("Start IMEI", key="imei_v3_start_imei")
     with right:
         step = st.number_input("Thread [Recommended: 4]", min_value=1, max_value=999, value=4, step=1, key="imei_v3_step")
-    attempts = st.number_input("No. of IMEI", min_value=1, max_value=50, value=50, step=1, key="imei_v3_attempts")
+    attempts = st.number_input("No. of IMEI", min_value=1, value=50, step=1, key="imei_v3_attempts")
 
     if st.button("Start IMEI Scan", key="start_imei_scan_v3", use_container_width=True):
         if not model or not csc or not base or not start_imei:
@@ -4296,23 +4320,43 @@ def render_decryption_tab(catalog: dict[str, list[dict[str, Any]]]) -> None:
 
     picker_cols = st.columns([1.4, 1.1], gap="medium")
     with picker_cols[0]:
-        selected_model = st.selectbox(
-            "Known Model",
-            [""] + model_options,
-            format_func=lambda value: "Select from database" if not value else value,
-            key="decrypt_known_model_v4",
+        model_mode = st.radio(
+            "Device Selection Mode",
+            ["Auto", "Manual"],
+            horizontal=True,
+            key="decrypt_model_mode_v4",
         )
-        manual_model = st.text_input("Manual Model Number", key="decrypt_model_input_v4")
+        if model_mode == "Auto":
+            selected_model = st.selectbox(
+                "Device Model (Database)",
+                [""] + model_options,
+                format_func=lambda value: "Select from database" if not value else value,
+                key="decrypt_known_model_v4",
+            )
+            manual_model = ""
+        else:
+            selected_model = ""
+            manual_model = st.text_input("Device Model (Manual)", key="decrypt_model_input_v4")
     with picker_cols[1]:
         effective_model = normalize_model_number(manual_model or selected_model)
         csc_options = csc_options_for_model(effective_model)
-        selected_csc = st.selectbox(
-            "Known CSC",
-            [""] + csc_options,
-            format_func=lambda value: "Select CSC" if not value else value,
-            key="decrypt_known_csc_v4",
+        csc_mode = st.radio(
+            "CSC Selection Mode",
+            ["Auto", "Manual"],
+            horizontal=True,
+            key="decrypt_csc_mode_v4",
         )
-        manual_csc = st.text_input("Manual CSC", key="decrypt_csc_input_v4")
+        if csc_mode == "Auto":
+            selected_csc = st.selectbox(
+                "CSC (Database)",
+                [""] + csc_options,
+                format_func=lambda value: "Select CSC" if not value else value,
+                key="decrypt_known_csc_v4",
+            )
+            manual_csc = ""
+        else:
+            selected_csc = ""
+            manual_csc = st.text_input("CSC (Manual)", key="decrypt_csc_input_v4")
 
     effective_csc = normalize_csc_code(manual_csc or selected_csc)
     if effective_model:
