@@ -3,6 +3,7 @@ from InquirerPy.utils import get_style
 
 import csv
 import hashlib
+import hmac
 import json
 import os
 import random
@@ -98,6 +99,8 @@ OJM_CSCS = ["ACR","AFG","AFR","DKR","ECT","EGY","FWD","ILO","ILP","KSA","LYS","M
 OLE_CSCS = ["XID"]
 OWO_CSCS = ["BVO","BVT","CHE","CHL","CHO","CHT","CHX","GTO","NBS","ZTA","ZTM","ZTO","ZTR","ZVV"]
 OXE_CSCS = ["CAU","SEK","SKZ","SER"]
+CANADA_W_CSCS = ["XAC","BMC","RWC","TLS","KDO","VTR","BWA","PCM"]
+A73_CSCS = ODM_CSCS[:] + OJM_CSCS[:] + OLE_CSCS[:] + OWO_CSCS[:] + OXE_CSCS[:]
 USA_U_CSCS = ["ATT","VZW","TMB","CHA","CCT","DSA","DSG","GCF","XAA","USC"]
 USA_U1_CSCS = ["ATT","VZW","TMB","CHA","CCT","DSA","DSG","XAA","USC","XPO","FKR","XAG","XAR","WWD","TMK","AIO","LRA"]
 
@@ -108,6 +111,8 @@ CSC_BLOCKS = {
     "OLE": OLE_CSCS,
     "OWO": OWO_CSCS,
     "OXE": OXE_CSCS,
+    "A73": A73_CSCS,
+    "CAN_W": CANADA_W_CSCS,
     "USA_U": USA_U_CSCS,
     "USA_U1": USA_U1_CSCS,
 }
@@ -195,6 +200,8 @@ def request_xml(url: str, retries: int = 3, timeout: int = 12) -> Optional[bytes
     for attempt in range(1, retries + 1):
         try:
             r = requests.get(url, headers={"User-Agent": random.choice(agents), "Connection": "close"}, timeout=timeout)
+            if r.status_code in (403, 404):
+                return None
             if r.status_code == 200 and r.content:
                 return r.content
             last_err = f"HTTP {r.status_code}"
@@ -206,17 +213,99 @@ def request_xml(url: str, retries: int = 3, timeout: int = 12) -> Optional[bytes
     return None
 
 
+VERSION_TEST_HMAC_SHA256_KEY = b"fcjimts25@%"
+
+
+def _is_hex_string(value: str) -> bool:
+    raw = (value or "").strip()
+    if not raw:
+        return False
+    try:
+        int(raw, 16)
+        return True
+    except ValueError:
+        return False
+
+
+def is_version_test_md5_hash(value: str) -> bool:
+    raw = (value or "").strip().lower()
+    return len(raw) == 32 and _is_hex_string(raw)
+
+
+def is_version_test_hmac_sha256_hash(value: str) -> bool:
+    raw = (value or "").strip().lower()
+    return len(raw) == 64 and _is_hex_string(raw)
+
+
+def is_version_test_hash(value: str) -> bool:
+    return is_version_test_md5_hash(value) or is_version_test_hmac_sha256_hash(value)
+
+
 def get_md5_list(model: str, cc: str) -> List[str]:
+    """Return version.test.xml hashes, including newer layouts where <latest> can itself be a hash."""
     url = f"https://fota-cloud-dn.ospserver.net/firmware/{cc}/{model}/version.test.xml"
     content = request_xml(url)
     if not content:
         return []
+
+    try:
+        xml_text = content.decode("utf-8", errors="ignore")
+    except Exception:
+        xml_text = ""
+
     try:
         xml = etree.fromstring(content)
-        return [x.strip() for x in xml.xpath("//value//text()") if x and x.strip()]
-    except Exception as e:
-        console.print(f"[bold {P['err']}]XML parse error[/]: {e}")
-        return []
+    except Exception:
+        xml = None
+
+    hashes: List[str] = []
+    seen: Set[str] = set()
+
+    def add_hash(value: str) -> None:
+        hv = (value or "").strip().lower()
+        if is_version_test_hash(hv) and hv not in seen:
+            seen.add(hv)
+            hashes.append(hv)
+
+    if xml is not None:
+        latest_nodes = xml.xpath("//latest//text()")
+        if latest_nodes:
+            add_hash(latest_nodes[0])
+        for node in xml.xpath("//value//text()"):
+            add_hash(node)
+
+    if xml_text:
+        latest_match = re.search(
+            r'<latest(?:\s+o="([^"]*)")?\s*>(.*?)</latest>|<latest(?:\s+o="([^"]*)")?\s*/>',
+            xml_text,
+            re.S | re.I,
+        )
+        if latest_match:
+            add_hash((latest_match.group(2) or "").strip())
+
+        for match in re.finditer(r'<value(?:\s+[^>]*)?>(.*?)</value>', xml_text, re.S | re.I):
+            add_hash(match.group(1))
+
+    return hashes
+
+
+def split_hashes(hash_list: Iterable[str]) -> Tuple[Set[str], Set[str], Set[str]]:
+    md5_set: Set[str] = set()
+    hmac_sha256_set: Set[str] = set()
+    unknown_set: Set[str] = set()
+
+    for value in hash_list:
+        if not value:
+            continue
+        raw = str(value).strip().lower()
+        if is_version_test_md5_hash(raw):
+            md5_set.add(raw)
+        elif is_version_test_hmac_sha256_hash(raw):
+            hmac_sha256_set.add(raw)
+        else:
+            unknown_set.add(raw)
+
+    return md5_set, hmac_sha256_set, unknown_set
 
 
 def get_latest_version(model: str, cc: str) -> Tuple[Optional[str], Optional[str]]:
@@ -237,8 +326,20 @@ def get_latest_version(model: str, cc: str) -> Tuple[Optional[str], Optional[str
 
 def get_csc_fallbacks(primary_cc: str) -> List[str]:
     primary_cc = primary_cc.upper()
+    blocks = [
+        OXM_CSCS,
+        ODM_CSCS,
+        OJM_CSCS,
+        OLE_CSCS,
+        OWO_CSCS,
+        OXE_CSCS,
+        A73_CSCS,
+        USA_U_CSCS,
+        USA_U1_CSCS,
+        CANADA_W_CSCS,
+    ]
     fallback: List[str] = []
-    for _, members in CSC_BLOCKS.items():
+    for members in blocks:
         if primary_cc in members:
             for item in members:
                 if item not in fallback:
@@ -333,6 +434,9 @@ def save_outputs(model: str, cc: str, decrypted_map: Dict[str, dict], server_md5
 # ===============================
 def derive_codes(model: str, cc: str, latest_version: Optional[str]) -> Tuple[str, str, str, str, str, str, str, str]:
     cc = cc.upper()
+    if cc in OWO_CSCS:
+        latest_version = None
+
     if latest_version:
         vp = latest_version.split("/")
         first_code = vp[0][:-6]
@@ -340,7 +444,7 @@ def derive_codes(model: str, cc: str, latest_version: Optional[str]) -> Tuple[st
         third_code = vp[2][:-6] if len(vp) > 2 else ""
 
         latest_year = vp[0][-3]
-        start_year = chr(ord("A") + max(0, ord(latest_year) - ord("A") - 4))
+        start_year = chr(ord("A") + max(0, ord(latest_year) - ord("A") - 3))
         end_year = next_char(latest_year) if vp[0][-2] in "JKL" else latest_year
         start_bl = "0"
         end_bl = next_char(vp[0][-5])
@@ -352,10 +456,47 @@ def derive_codes(model: str, cc: str, latest_version: Optional[str]) -> Tuple[st
     suffix = "U1" if model_code.endswith("U1") else model_code[-1]
 
     ap_tag, csc_tag, cp_tag = "XX", "OXM", "XX"
-    if cc in ("CHC", "CHN"):
-        ap_tag, csc_tag, cp_tag = "ZC", "CHC", ("" if cc == "CHN" else "ZC")
-    elif cc == "TGY":
-        ap_tag, csc_tag, cp_tag = "ZH", "OZS", "ZC"
+    region_defaults = {
+        "CHC": ("ZC", "CHC", "ZC"),
+        "CHN": ("ZC", "CHC", ""),
+        "TGY": ("ZH", "OZS", "ZC"),
+        "ATT": ("SQ", "OYN", "SQ"),
+        "VZW": ("SQ", "OYN", "SQ"),
+        "TMB": ("SQ", "OYN", "SQ"),
+        "CHA": ("SQ", "OYN", "SQ"),
+        "CCT": ("SQ", "OYN", "SQ"),
+        "DSA": ("SQ", "OYN", "SQ"),
+        "DSG": ("SQ", "OYN", "SQ"),
+        "GCF": ("SQ", "OYN", "SQ"),
+        "XAA": ("SQ", "OYN", "SQ"),
+        "USC": ("SQ", "OYN", "SQ"),
+        "XPO": ("SQ", "OYN", "SQ"),
+        "FKR": ("SQ", "OYN", "SQ"),
+        "XAG": ("SQ", "OYN", "SQ"),
+        "XAR": ("SQ", "OYN", "SQ"),
+        "TMK": ("SQ", "OYN", "SQ"),
+        "AIO": ("SQ", "OYN", "SQ"),
+        "LRA": ("SQ", "OYN", "SQ"),
+        "KOO": ("KS", "OKR", "KS"),
+        "EUX": ("XX", "OXM", "XX"),
+        "EUY": ("XX", "OXM", "XX"),
+        "INS": ("XX", "ODM", "XX"),
+        "NPL": ("XX", "ODM", "XX"),
+        "SLK": ("XX", "ODM", "XX"),
+        "CHX": ("XX", "OWO", "XX"),
+        "ZTR": ("XX", "OWO", "XX"),
+        "XAC": ("VL", "OYV", "VL"),
+        "BMC": ("VL", "OYV", "VL"),
+        "RWC": ("VL", "OYV", "VL"),
+        "TLS": ("VL", "OYV", "VL"),
+        "KDO": ("VL", "OYV", "VL"),
+        "VTR": ("VL", "OYV", "VL"),
+        "BWA": ("VL", "OYV", "VL"),
+        "PCM": ("VL", "OYV", "VL"),
+    }
+
+    if cc in region_defaults:
+        ap_tag, csc_tag, cp_tag = region_defaults[cc]
     elif suffix == "U":
         ap_tag, csc_tag, cp_tag = "SQ", "OYN", "SQ"
     elif suffix == "U1":
@@ -363,24 +504,21 @@ def derive_codes(model: str, cc: str, latest_version: Optional[str]) -> Tuple[st
     elif suffix == "W":
         ap_tag, csc_tag, cp_tag = "VL", "OYV", "VL"
     elif suffix == "N":
-        ap_tag, csc_tag, cp_tag = "NK", "OKR", "NK"
+        ap_tag, csc_tag, cp_tag = "KS", "OKR", "KS"
     elif suffix == "0":
         ap_tag = "ZH" if cc in ["TGY", "BRI"] else "ZC"
         csc_tag = cc
         cp_tag = ap_tag
-    elif cc in ["EUX", "EUY"]:
-        ap_tag, csc_tag, cp_tag = "XX", "OXM", "XX"
-    elif cc in ["INS", "NPL", "SLK"]:
-        ap_tag, csc_tag, cp_tag = "XX", "ODM", "XX"
-    elif cc in ["CHX", "ZTR"]:
-        ap_tag, csc_tag, cp_tag = "XX", "OWO", "XX"
 
     first_code = model_code + ap_tag
     second_code = model_code + csc_tag
     third_code = model_code + cp_tag if cp_tag else ""
 
-    start_year = chr(max(ord("A"), datetime.now().year - 2001 + ord("A") - 3))
-    end_year = next_char(next_char(start_year))
+    now_year = datetime.now().year
+    start_y = max(2017, now_year - 8)
+    end_y = min(2027, now_year + 2)
+    start_year = chr(ord("A") + max(0, min(25, start_y - 2001)))
+    end_year = chr(ord("A") + max(0, min(25, end_y - 2001)))
     start_bl = "0"
     end_bl = "9"
     start_upd = "A"
@@ -396,20 +534,21 @@ def decrypt_firmware(
     full_brute: bool = True,
     progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> Dict[str, dict]:
-    md5_set: Set[str] = set(md5_list)
-    if not md5_set:
+    hash_values = [str(value).strip().lower() for value in md5_list if str(value).strip()]
+    if not hash_values:
         return {}
 
+    cc = cc.upper()
     first_code, second_code, third_code, start_year, end_year, start_bl, end_bl, upd_range = derive_codes(model, cc, latest_version)
     start_upd, end_upd = upd_range.split(":", 1)
 
-    # Keep dc2-like broad search, including Z beta and E-prefixed AP variants.
     years = letters_range(start_year, end_year)
     bls = letters_range(start_bl, end_bl)
     updates = letters_range(start_upd, end_upd)
     if "Z" not in updates:
         updates += "Z"
 
+    md5_set, hmac_sha256_set, _ = split_hashes(hash_values)
     cp_versions: List[str] = []
     decrypted: Dict[str, dict] = {}
     seen_versions: Set[str] = set()
@@ -418,11 +557,25 @@ def decrypt_firmware(
     progress_label = f"{model}/{cc}"
     last_reported_percent = -1
 
-    def register(ver: str, md5: str, ych: str, mch: str) -> None:
-        if md5 in md5_set and md5 not in decrypted and ver not in seen_versions:
+    def register(ver: str, hit_hash: str, ych: str, mch: str, algo: str) -> None:
+        if hit_hash in decrypted or ver in seen_versions:
+            return
+        if algo == "md5" and hit_hash not in md5_set:
+            return
+        if algo == "hmac-sha256" and hit_hash not in hmac_sha256_set:
+            return
+        if algo not in {"md5", "hmac-sha256"}:
+            return
+        if hit_hash:
             y = ord(ych) - ord("A") + 2001
             m = ord(mch) - ord("A") + 1
-            decrypted[md5] = {"version": ver, "year": y, "month": m, "kind": classify_build(ver, latest_version)}
+            decrypted[hit_hash] = {
+                "version": ver,
+                "year": y,
+                "month": m,
+                "kind": classify_build(ver, latest_version),
+                "algo": algo,
+            }
             seen_versions.add(ver)
 
     with Progress(
@@ -433,6 +586,7 @@ def decrypt_firmware(
         TimeElapsedColumn(),
         console=console,
         transient=True,
+        disable=bool(progress_callback),
     ) as progress:
         task = progress.add_task("scan", total=outer_total, target=progress_label)
         if progress_callback:
@@ -449,9 +603,9 @@ def decrypt_firmware(
                                 if percent != last_reported_percent:
                                     last_reported_percent = percent
                                     progress_callback("decrypt", completed, outer_total, f"{progress_label}|resolved={len(decrypted)}")
-                            local_cp = cp_versions[-16:].copy()
+                            local_cp = cp_versions[-12:].copy()
                             if third_code:
-                                for i in range(1, 4):
+                                for i in range(1, 3):
                                     seed = third_code + flavor + bl + upd + ych + mch + str(i)
                                     if seed not in local_cp:
                                         local_cp.append(seed)
@@ -460,40 +614,72 @@ def decrypt_firmware(
                                 rnd = bl + upd + ych + mch + serial
                                 beta_rnd = bl + "Z" + ych + mch + serial
                                 tcode = "" if not third_code else third_code + flavor + rnd
-                                btcode = "" if not third_code else third_code + flavor + beta_rnd
 
-                                # learn nearby CP candidates like dc2
                                 if third_code:
                                     for nearby in [serial, prev_char(serial), prev_char(prev_char(serial))]:
                                         cpv = third_code + flavor + bl + upd + ych + mch + nearby
                                         if cpv not in local_cp:
                                             local_cp.append(cpv)
 
-                                normal_versions = [
-                                    f"{first_code}{flavor}{rnd}/{second_code}{rnd}/{tcode}",
-                                    f"{first_code}E{rnd}/{second_code}{rnd}/{tcode}",
-                                    f"{first_code}{flavor}{beta_rnd}/{second_code}{beta_rnd}/{btcode}",
-                                    f"{first_code}E{beta_rnd}/{second_code}{beta_rnd}/{btcode}",
-                                ]
-                                for ver in normal_versions:
-                                    register(ver, hashlib.md5(ver.encode()).hexdigest(), ych, mch)
+                                ap_norm = f"{first_code}{flavor}{rnd}"
+                                ap_e = f"{first_code}E{rnd}"
+                                ap_zn = f"{first_code}{flavor}{beta_rnd}"
+                                ap_ze = f"{first_code}E{beta_rnd}"
+                                csc_norm = f"{second_code}{rnd}"
+                                csc_z = f"{second_code}{beta_rnd}"
 
-                                # CP variants / mismatched CP can expose more server lines
-                                for cpv in local_cp:
+                                candidates: List[Tuple[str, str, str]] = [
+                                    (ap_norm, csc_norm, tcode),
+                                    (ap_e, csc_norm, tcode),
+                                    (ap_zn, csc_z, tcode),
+                                    (ap_ze, csc_z, tcode),
+                                ]
+
+                                for cpv in local_cp[-12:]:
                                     if cpv:
-                                        ver2 = f"{first_code}{flavor}{rnd}/{second_code}{rnd}/{cpv}"
-                                        ver2e = f"{first_code}E{rnd}/{second_code}{rnd}/{cpv}"
-                                        ver4 = f"{first_code}{flavor}{beta_rnd}/{second_code}{beta_rnd}/{cpv}"
-                                        ver4e = f"{first_code}E{beta_rnd}/{second_code}{beta_rnd}/{cpv}"
-                                        register(ver2, hashlib.md5(ver2.encode()).hexdigest(), ych, mch)
-                                        register(ver2e, hashlib.md5(ver2e.encode()).hexdigest(), ych, mch)
-                                        register(ver4, hashlib.md5(ver4.encode()).hexdigest(), ych, mch)
-                                        register(ver4e, hashlib.md5(ver4e.encode()).hexdigest(), ych, mch)
+                                        candidates.extend(
+                                            [
+                                                (ap_norm, csc_norm, cpv),
+                                                (ap_e, csc_norm, cpv),
+                                                (ap_zn, csc_z, cpv),
+                                                (ap_ze, csc_z, cpv),
+                                            ]
+                                        )
+
+                                dm_candidates = []
+                                for ap_part, csc_part, cp_part in candidates:
+                                    dm_candidates.append((ap_part + ".DM", csc_part, cp_part))
+                                    dm_candidates.append((ap_part + ".DM.BIG", csc_part, cp_part))
+                                candidates.extend(dm_candidates)
+
+                                for ap_part, csc_part, cp_part in candidates:
+                                    ver = f"{ap_part}/{csc_part}/{cp_part}"
+                                    hit_hash = ""
+                                    hit_algo = ""
+
+                                    if md5_set:
+                                        md5_hash = hashlib.md5(ver.encode("ascii", errors="ignore")).hexdigest()
+                                        if md5_hash in md5_set and md5_hash not in decrypted:
+                                            hit_hash = md5_hash
+                                            hit_algo = "md5"
+
+                                    if not hit_hash and hmac_sha256_set:
+                                        hmac_hash = hmac.new(
+                                            VERSION_TEST_HMAC_SHA256_KEY,
+                                            ver.encode("ascii", errors="ignore"),
+                                            hashlib.sha256,
+                                        ).hexdigest()
+                                        if hmac_hash in hmac_sha256_set and hmac_hash not in decrypted:
+                                            hit_hash = hmac_hash
+                                            hit_algo = "hmac-sha256"
+
+                                    if hit_hash:
+                                        register(ver, hit_hash, ych, mch, hit_algo)
 
                                 if tcode and tcode not in cp_versions and any(v.endswith("/" + tcode) for v in seen_versions):
                                     cp_versions.append(tcode)
 
-                                if not full_brute and len(decrypted) == len(md5_set):
+                                if not full_brute and len(decrypted) >= (len(md5_set) + len(hmac_sha256_set)):
                                     if progress_callback:
                                         progress_callback("decrypt", outer_total, outer_total, f"{progress_label}|resolved={len(decrypted)}")
                                     return decrypted

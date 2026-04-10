@@ -44,7 +44,7 @@
             "name": "S25 Ultra",
             "model": "SM-S938B",
             "csc": "EUX",
-            "imei": "354222650031778",
+            "imei": "354222650030044",
             "category": "S25 Series",
             "base": "S938BXXU8ZZCF/S938BOXM8ZZCF/S938BXXU8CZCF"
         },
@@ -274,7 +274,8 @@
             "csc": "EUX",
             "imei": "352952650015684",
             "category": "Tablets",
-            "base": "X706BXXUAEZC3/X706BOXMAEZC3/X706BXXUAEZC3"
+            "base": "X706BXXUAEZC3/X706BOXMAEZC3/X706BXXUAEZC3",
+            "latest": "X706BXXUAEZD1/X706BOXMAEZD1/X706BXXUAEZD1"
         },
         {
             "name": "Tab S9 Ultra",
